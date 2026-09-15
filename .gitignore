@@ -1,0 +1,63 @@
+# Python / uv
+.venv/
+.venv-*/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# Synthesis outputs & logs
+output/
+*.log
+generate.log
+
+# Local working inputs at repo root (legacy / convenience paths)
+/script.md
+/script.ssml
+/script.xml
+/script.txt
+/notes.txt
+/source.ogg
+/source.wav
+/source.mp3
+/source.flac
+/source.m4a
+/reference.ogg
+/reference.wav
+/reference.mp3
+
+# Local workspace (your scripts & reference voices live here)
+/workspace/**
+!/workspace/.gitkeep
+!/workspace/README.md
+
+# Generated audio outside examples/
+/*.wav
+/*.flac
+!examples/**
+
+# Model / Hugging Face caches
+.cache/
+pretrained_models/
+.huggingface/
+
+# Local secrets / overrides
+.env
+.env.*
+!.env.example

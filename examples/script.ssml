@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Example SSML talk script. Copy into workspace/:
+     cp examples/script.ssml workspace/script.ssml
+-->
+<speak xml:lang="ja-JP">
+  <p>
+    これはサンプルの読み上げ本文です。
+    <break time="400ms"/>
+    短い文を並べると、音声合成が安定しやすくなります。
+  </p>
+  <p>
+    <prosody rate="slow">ここはゆっくり話します。</prosody>
+    <break time="500ms"/>
+    固有名詞や英語が混ざる場合も、そのまま書いて構いません。
+  </p>
+  <p>
+    以上で、サンプル読み上げを終わります。
+    ご清聴ありがとうございました。
+  </p>
+</speak>

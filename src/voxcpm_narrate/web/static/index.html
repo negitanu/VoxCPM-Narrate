@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VoxCPM Narrate</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="top-app-bar">
+    <div class="top-app-bar__row">
+      <span class="material-symbols-outlined brand-icon">record_voice_over</span>
+      <div class="brand">
+        <div class="brand__title">VoxCPM Narrate</div>
+        <div class="brand__subtitle">参照声音 + SSML から読み上げ音声を生成</div>
+      </div>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="hero-card elevated">
+      <h1>音声をアップロードして、自動でナレーションを作成</h1>
+      <p>
+        参照用の声（約 15〜25 秒）と SSML 台本を選ぶと、ローカルの VoxCPM2 が読み上げ音声を生成します。
+        長い台本は時間がかかります。進捗はこの画面で確認できます。
+      </p>
+    </section>
+
+    <form id="job-form" class="layout">
+      <div class="column">
+        <article class="card elevated">
+          <div class="card__header">
+            <span class="material-symbols-outlined">mic</span>
+            <h2>1. 参照声音</h2>
+          </div>
+          <p class="card__hint">WAV / OGG / MP3 など。クローンの声色になります。</p>
+          <label class="dropzone" id="ref-dropzone">
+            <input type="file" id="reference" name="reference" accept="audio/*,.wav,.ogg,.mp3,.flac,.m4a" required hidden />
+            <span class="material-symbols-outlined dropzone__icon">upload_file</span>
+            <span class="dropzone__title">ファイルを選択またはドロップ</span>
+            <span class="dropzone__file" id="ref-filename">未選択</span>
+          </label>
+          <audio id="ref-preview" controls class="audio-preview hidden"></audio>
+        </article>
+
+        <article class="card elevated">
+          <div class="card__header">
+            <span class="material-symbols-outlined">description</span>
+            <h2>2. SSML 台本</h2>
+          </div>
+          <p class="card__hint">.ssml / .xml。または下に直接貼り付けもできます。</p>
+          <label class="dropzone" id="ssml-dropzone">
+            <input type="file" id="ssml" name="ssml" accept=".ssml,.xml,text/xml,application/xml,text/plain" hidden />
+            <span class="material-symbols-outlined dropzone__icon">code</span>
+            <span class="dropzone__title">SSML ファイルを選択</span>
+            <span class="dropzone__file" id="ssml-filename">未選択</span>
+          </label>
+          <label class="field">
+            <span class="field__label">SSML テキスト（ファイルの代わりに利用可）</span>
+            <textarea id="ssml-text" rows="10" placeholder="&lt;speak xml:lang=&quot;ja-JP&quot;&gt;…&lt;/speak&gt;"></textarea>
+          </label>
+        </article>
+      </div>
+
+      <div class="column">
+        <article class="card elevated">
+          <div class="card__header">
+            <span class="material-symbols-outlined">tune</span>
+            <h2>3. 設定</h2>
+          </div>
+
+          <label class="field">
+            <span class="field__label">話し方コントロール</span>
+            <input type="text" id="control" value="ややゆっくり、落ち着いたプレゼン説明調" />
+          </label>
+
+          <label class="field">
+            <span class="field__label">デバイス</span>
+            <select id="device">
+              <option value="auto" selected>auto（推奨）</option>
+              <option value="mps">mps（Apple Silicon）</option>
+              <option value="cuda">cuda</option>
+              <option value="cpu">cpu</option>
+            </select>
+          </label>
+
+          <div class="field-row">
+            <label class="field">
+              <span class="field__label">最大文字 / セグメント</span>
+              <input type="number" id="max_chars" value="120" min="40" max="300" />
+            </label>
+            <label class="field">
+              <span class="field__label">CFG</span>
+              <input type="number" id="cfg_value" value="2.0" min="1.0" max="3.0" step="0.1" />
+            </label>
+          </div>
+
+          <div class="switches">
+            <label class="switch">
+              <input type="checkbox" id="improve" checked />
+              <span class="switch__track"></span>
+              <span class="switch__label">
+                <strong>自己改善ループ</strong>
+                <small>違和感セグメントを再生成して置換</small>
+              </span>
+            </label>
+            <label class="switch">
+              <input type="checkbox" id="improve_asr" checked />
+              <span class="switch__track"></span>
+              <span class="switch__label">
+                <strong>ASR 採点</strong>
+                <small>SenseVoice で読み誤りも検出（初回ダウンロードあり）</small>
+              </span>
+            </label>
+          </div>
+
+          <label class="field">
+            <span class="field__label">改善ラウンド数</span>
+            <input type="number" id="improve_rounds" value="3" min="0" max="6" />
+          </label>
+
+          <button type="submit" class="btn-filled" id="submit-btn">
+            <span class="material-symbols-outlined">play_arrow</span>
+            音声を作成
+          </button>
+        </article>
+
+        <article class="card elevated" id="progress-card">
+          <div class="card__header">
+            <span class="material-symbols-outlined">monitoring</span>
+            <h2>進捗</h2>
+          </div>
+          <div class="status-chip" id="status-chip">待機中</div>
+          <div class="progress">
+            <div class="progress__bar" id="progress-bar" style="width: 0%"></div>
+          </div>
+          <p class="progress__meta" id="progress-meta">ジョブ未開始</p>
+          <p class="progress__message" id="progress-message">参照声音と SSML を用意して開始してください。</p>
+
+          <div id="result-panel" class="result-panel hidden">
+            <audio id="result-audio" controls class="audio-preview"></audio>
+            <a class="btn-tonal" id="download-btn" href="#">
+              <span class="material-symbols-outlined">download</span>
+              WAV をダウンロード
+            </a>
+            <p class="result-stats" id="result-stats"></p>
+          </div>
+        </article>
+      </div>
+    </form>
+  </main>
+
+  <footer class="footer">
+    Local VoxCPM2 · Material Design UI · <span id="health">checking…</span>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
