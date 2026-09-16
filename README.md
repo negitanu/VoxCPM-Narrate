@@ -18,10 +18,9 @@
 7. [音声合成](#音声合成)
 8. [自己改善ループ](#自己改善ループ)
 9. [CLI / オプション一覧](#cli--オプション一覧)
-10. [VoxCPM submodule（任意）](#voxcpm-submodule任意)
-11. [別プロジェクトへの持ち込み](#別プロジェクトへの持ち込み)
-12. [トラブルシューティング](#トラブルシューティング)
-13. [ライセンス](#ライセンス)
+10. [別プロジェクトへの持ち込み](#別プロジェクトへの持ち込み)
+11. [トラブルシューティング](#トラブルシューティング)
+12. [ライセンス](#ライセンス)
 
 ---
 
@@ -39,7 +38,6 @@
 │   ├── synthesize.py            # VoxCPM2 合成
 │   ├── harness/                 # 採点・再生成ループ
 │   └── web/                     # FastAPI + Material UI
-├── third_party/VoxCPM/          # OpenBMB/VoxCPM（git submodule・任意）
 ├── examples/
 │   ├── script.md                # Markdown 台本テンプレ
 │   ├── script.ssml              # SSML 台本テンプレ
@@ -419,32 +417,6 @@ uv run voxcpm-narrate improve \
 
 ---
 
-## VoxCPM submodule（任意）
-
-通常は PyPI の `voxcpm` パッケージ（`uv sync`）だけで動作します。
-upstream のソースを手元に置きたい場合は、[OpenBMB/VoxCPM](https://github.com/OpenBMB/VoxCPM) を **git submodule** として含められます。
-
-```zsh
-# clone 時
-git clone --recurse-submodules <this-repo-url>
-# または既存 clone
-git submodule update --init --recursive
-```
-
-```text
-third_party/VoxCPM/   # https://github.com/OpenBMB/VoxCPM
-```
-
-ローカルソースから入れたいとき（任意）:
-
-```zsh
-uv pip install -e third_party/VoxCPM
-```
-
-> 既定の依存解決は `pyproject.toml` の `voxcpm>=2.0.0` です。submodule は参照・開発用で必須ではありません。
-
----
-
 ## 別プロジェクトへの持ち込み
 
 ```text
@@ -452,7 +424,6 @@ your-project/
   pyproject.toml / uv.lock / README.md / LICENSE
   generate_speech.zsh / improve_speech.zsh / serve_web.zsh
   src/voxcpm_narrate/
-  third_party/VoxCPM/   # optional submodule
   examples/
   workspace/     # 案件入力（gitignore）
   output/        # 生成物（gitignore）
@@ -460,7 +431,6 @@ your-project/
 
 ```zsh
 cd your-project
-git submodule update --init --recursive   # submodule を使う場合
 uv sync
 ./serve_web.zsh
 # または CLI:
