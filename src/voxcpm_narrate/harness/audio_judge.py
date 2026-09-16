@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import urllib.error
 import urllib.request
@@ -187,7 +188,9 @@ def judge_audio_with_openrouter(
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {resolved_key}",
-        "HTTP-Referer": "https://github.com/OpenBMB/VoxCPM",
+        "HTTP-Referer": os.environ.get(
+            "OPENROUTER_HTTP_REFERER", "https://github.com/negitanu/VoxCPM-Narrate"
+        ),
         "X-Title": "voxcpm-narrate-pattern-b",
     }
 

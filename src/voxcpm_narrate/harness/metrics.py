@@ -33,7 +33,7 @@ def _normalize_ja(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
     text = text.lower()
     text = re.sub(r"\s+", "", text)
-    text = re.sub(r"[、。！？!?.,・「」『』（）()【】\[\]…・ー−-]", "", text)
+    text = re.sub(r"[、。！？!?.,・「」『』（）()【】\[\]…・−-]", "", text)
     return text
 
 

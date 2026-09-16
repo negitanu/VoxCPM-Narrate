@@ -22,11 +22,12 @@ def _add_common_synth_args(p: argparse.ArgumentParser) -> None:
     p.set_defaults(optimize=False)
     p.add_argument("--cfg-value", type=float, default=2.0)
     p.add_argument("--inference-timesteps", type=int, default=10)
-    p.add_argument("--normalize", action="store_true", default=True)
+    p.add_argument("--normalize", action="store_true", default=True,
+                   help="Expand numbers into Japanese readings (not audio gain)")
     p.add_argument("--no-normalize", dest="normalize", action="store_false")
     p.add_argument(
         "--control",
-        default="ややゆっくり、落ち着いたプレゼン説明調",
+        default="日本語、明瞭な声、自然な抑揚、会話に近いテンポ",
         help="Style / voice-design control instruction",
     )
     p.add_argument("--no-control", action="store_true", help="Disable control prefix")

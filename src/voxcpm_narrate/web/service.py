@@ -20,6 +20,7 @@ from voxcpm_narrate.harness.asr import AsrTranscriber
 from voxcpm_narrate.harness.judge import LlmJudge, default_llm_api_key
 from voxcpm_narrate.harness.loop import evaluate_segment
 from voxcpm_narrate.harness.strategies import GenParams, build_strategies
+from voxcpm_narrate.pronunciation import find_unknown_words
 from voxcpm_narrate.synthesize import assemble_full_wav, generate_wav, load_model
 from voxcpm_narrate.web.jobs import ACTIVE, Conflict, JobManager, new_job, now
 
@@ -112,6 +113,11 @@ class ProductionService:
 
         return self.manager.mutate(jid, change)
 
+    def pronunciation_candidates(self, jid: str, script: str | None = None) -> list[dict]:
+        job = self.manager.get(jid)
+        source = script if script is not None else job["script"]
+        return find_unknown_words(source, job.get("dictionary", {}))
+
     def model(self, config):
         key = (config["model_id"], config["device"])
         if key != self._model_key:
@@ -163,7 +169,9 @@ class ProductionService:
         self.manager.update(jid, phase="synthesize", message=f"{sid} を生成しています")
         spoken = self._spoken(draft, job["dictionary"])
         started = time.monotonic()
-        wav = generate_wav(model, text=spoken, reference_audio=cfg.get("reference_audio"), **params)
+        input_metadata = {}
+        wav = generate_wav(model, text=spoken, reference_audio=cfg.get("reference_audio"),
+                           input_metadata=input_metadata, **params)
         sr = int(model.tts_model.sample_rate)
         vid = uuid.uuid4().hex[:16]
         path = self.manager.job_dir(jid) / "versions" / sid / f"{vid}.wav"
@@ -173,6 +181,7 @@ class ProductionService:
             created_at=now(),
             **draft,
             spoken_text=spoken,
+            **input_metadata,
             params=params,
             sample_rate=sr,
             duration_sec=len(wav) / sr,
@@ -389,26 +398,38 @@ class ProductionService:
         source = folder / "full.wav"
         if not normalize:
             return source
-        result = folder / "full_peak_minus_1db.wav"
-        if not result.is_file():
-            import numpy as np
-            import soundfile as sf
-            wav, sr = sf.read(source, dtype="float32")
-            peak = float(np.max(np.abs(wav)))
-            if peak > 0:
-                wav *= (10 ** (-1 / 20)) / peak
-            write_wav(result, wav, sr)
+        from voxcpm_narrate.audio_quality import PROCESSING_VERSION, finish
+
+        result = folder / f"full_{PROCESSING_VERSION}.wav"
+        marker = result.with_suffix(".quality.json")
+        if result.is_file() and marker.is_file():
+            report = json.loads(marker.read_text())
+            if (report.get("source_sha256") == file_hash(source)
+                    and report.get("output_sha256") == file_hash(result)):
+                return result
+        finish(source, result, manifest=json.loads((folder / "manifest.json").read_text()),
+               segments_dir=folder / "segments")
         return result
 
-    def export_zip(self, jid):
+    def export_zip(self, jid, normalize=False):
         job = self.manager.get(jid)
         if not job["export"]:
             raise ValueError("全セグメントを生成・採用してから書き出してください")
         folder = self.manager.job_dir(jid) / "exports" / job["export"]["id"]
+        source = self.export_audio(jid, normalize=normalize)
+        quality = None
+        if normalize:
+            import soundfile as sf
+
+            quality = json.loads(source.with_suffix(".quality.json").read_text())
+            finished, sample_rate = sf.read(source, dtype="float32")
         # A unique ZIP avoids races between simultaneous downloads.
         path = folder / (uuid.uuid4().hex + ".zip")
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.write(folder / "full.wav", "full.wav")
+            archive.write(source, "full.wav")
+            if quality:
+                archive.write(source.with_suffix(".quality.json"), "quality.json")
+                archive.write(folder / "full.wav", "originals/full.wav")
             archive.write(folder / "manifest.json", "manifest.json")
             archive.writestr("script.txt", job["script"])
             archive.writestr("production.json", json.dumps(job, ensure_ascii=False, indent=2))
@@ -419,13 +440,20 @@ class ProductionService:
             for item in json.loads((folder / "manifest.json").read_text()):
                 chapters.setdefault(item["section"], []).append(item)
             for index, (title, items) in enumerate(chapters.items(), 1):
-                chapter = folder / "chapters" / f"{index:02d}.wav"
-                if not chapter.is_file():
+                chapter = folder / ("finished_chapters" if normalize else "chapters") / f"{index:02d}.wav"
+                if quality:
+                    import numpy as np
+
+                    bounds = {a["id"]: a for a in quality["preparation"]["segments"]}
+                    parts = [finished[bounds[item["id"]]["start_sample"]:
+                                      bounds[item["id"]]["end_sample"]] for item in items]
+                    write_wav(chapter, np.concatenate(parts), sample_rate, subtype="PCM_24")
+                elif not chapter.is_file():
                     assemble_full_wav(items, folder / "segments",
                                       sample_rate=version(job["segments"][0])["sample_rate"],
                                       output_path=chapter)
                 archive.write(chapter, f"chapters/{index:02d}.wav")
             archive.writestr("chapters/index.json", json.dumps(list(chapters), ensure_ascii=False))
             for wav in sorted((folder / "segments").glob("*.wav")):
-                archive.write(wav, "segments/" + wav.name)
+                archive.write(wav, ("originals/segments/" if normalize else "segments/") + wav.name)
         return path

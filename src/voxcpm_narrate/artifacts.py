@@ -26,7 +26,7 @@ def write_json(path: Path, value: object) -> None:
     atomic_bytes(path, (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode())
 
 
-def write_wav(path: Path, wav, sample_rate: int) -> None:
+def write_wav(path: Path, wav, sample_rate: int, *, subtype: str = "FLOAT") -> None:
     import numpy as np
     import soundfile as sf
 
@@ -37,7 +37,7 @@ def write_wav(path: Path, wav, sample_rate: int) -> None:
     fd, name = tempfile.mkstemp(prefix=".pending-", suffix=".wav", dir=path.parent)
     os.close(fd)
     try:
-        sf.write(name, data, sample_rate)
+        sf.write(name, data, sample_rate, subtype=subtype)
         with open(name, "rb") as stream:
             os.fsync(stream.fileno())
         os.replace(name, path)

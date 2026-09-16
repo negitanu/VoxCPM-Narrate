@@ -236,6 +236,7 @@ def run_improve_loop(
                 }:
                     retry_control = str(job["control"])
 
+                input_metadata = {}
                 cand_wav = generate_wav(
                     model,
                     text=text,
@@ -245,6 +246,7 @@ def run_improve_loop(
                     inference_timesteps=params.inference_timesteps,
                     normalize=params.normalize,
                     seed=params.seed,
+                    input_metadata=input_metadata,
                 )
                 cand_path = candidates_dir / f"{seg_id}__{strategy_name}.wav"
                 write_wav(cand_path, cand_wav, sample_rate)
@@ -260,6 +262,7 @@ def run_improve_loop(
                     awkward_threshold=awkward_threshold,
                 )
                 attempt = {
+                    **input_metadata,
                     "strategy": strategy_name,
                     "params": params.to_dict(),
                     "score": cand_score.to_dict(),

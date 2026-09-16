@@ -2,6 +2,12 @@
 
 ローカルの [VoxCPM2](https://github.com/OpenBMB/VoxCPM) で、台本を読み上げ音声化するポータブルなバッチツールです。依存関係は **[uv](https://docs.astral.sh/uv/)** で管理します。
 
+- Markdown / プレーンテキスト / 実用 SSML から、長い台本をセグメント単位で生成
+- 参照声音による音声クローニングと、参照声音なしの Voice Design に対応
+- 日本語の本文を中国語・英語用の正規化に渡さず、数字・日付・単位の読みを明示的に処理
+- Web UI で編集、候補比較、採用・取り消し、中断・再開、読み辞書、仕上げまで管理
+- 原音を保持したまま、文間・音量・ラウドネスを調整した別 WAV を出力
+- 音響指標、任意の ASR / LLM 判定を使って、違和感のあるセグメントを再生成
 - 台本・参照声音・生成物は **git 管理外**（`workspace/` / `output/`）
 - ツール本体だけをコピーすれば、案件ごとに再利用できる
 
@@ -15,12 +21,13 @@
 4. [Web UI（Material Design）](#web-uimaterial-design)
 5. [参照声音の用意](#参照声音の用意)
 6. [入力形式](#入力形式)
-7. [音声合成](#音声合成)
-8. [自己改善ループ](#自己改善ループ)
-9. [CLI / オプション一覧](#cli--オプション一覧)
-10. [別プロジェクトへの持ち込み](#別プロジェクトへの持ち込み)
-11. [トラブルシューティング](#トラブルシューティング)
-12. [ライセンス](#ライセンス)
+7. [日本語の読みと音声の仕上げ](#日本語の読みと音声の仕上げ)
+8. [音声合成](#音声合成)
+9. [自己改善ループ](#自己改善ループ)
+10. [CLI / オプション一覧](#cli--オプション一覧)
+11. [別プロジェクトへの持ち込み](#別プロジェクトへの持ち込み)
+12. [トラブルシューティング](#トラブルシューティング)
+13. [ライセンス](#ライセンス)
 
 ---
 
@@ -36,8 +43,16 @@
 ├── src/voxcpm_narrate/          # Python パッケージ
 │   ├── extract.py / ssml.py     # 台本パース
 │   ├── synthesize.py            # VoxCPM2 合成
+│   ├── artifacts.py             # 原子的な成果物保存
+│   ├── japanese.py              # 日本語の数字・単位の読み
+│   ├── text_input.py            # 日本語の読み上げ入力
+│   ├── pronunciation.py         # 未知語候補の抽出
+│   ├── audio_quality.py         # 音量測定・仕上げ
+│   ├── quality_benchmark.py     # 再現可能な A/B 比較
 │   ├── harness/                 # 採点・再生成ループ
 │   └── web/                     # FastAPI + Material UI
+├── benchmarks/
+│   └── japanese-quality.json    # 公開可能な日本語30文
 ├── examples/
 │   ├── script.md                # Markdown 台本テンプレ
 │   ├── script.ssml              # SSML 台本テンプレ
@@ -61,7 +76,7 @@
 | OS | macOS / Linux（Windows は WSL 推奨） |
 | Python | **3.10–3.12**（`.python-version` は 3.12） |
 | パッケージ管理 | [uv](https://docs.astral.sh/uv/) |
-| 音声変換 | [ffmpeg](https://ffmpeg.org/)（`.ogg` / `.mp3` 参照声音を使う場合） |
+| 音声変換・仕上げ | [ffmpeg](https://ffmpeg.org/)（`.ogg` / `.mp3` の変換、音量測定・仕上げに使用） |
 | ディスク | モデル初回ダウンロード用に **数 GB** |
 | メモリ | 目安 16GB 以上（MPS/CPU は余裕があると安定） |
 
@@ -120,7 +135,7 @@ cp /path/to/recording.wav workspace/source.wav
 | 種類 | 探索順 |
 |------|--------|
 | 台本 | `workspace/script.ssml` → `workspace/script.md` → `./script.ssml` → `./script.md` |
-| 参照声音 | `workspace/source.{ogg,wav,mp3,flac,m4a}` → `./source.*` |
+| 参照声音 | `workspace/source.*` → `workspace/reference.*` → `./source.*` → `./reference.*` |
 
 環境変数で上書き可能: `VOXCPM_INPUT` / `VOXCPM_REFERENCE` / `VOXCPM_OUT_ROOT` / `VOXCPM_RUN_DIR`
 
@@ -142,6 +157,8 @@ uv run voxcpm-narrate-web
 # VOXCPM_WEB_HOST / VOXCPM_WEB_PORT / VOXCPM_WEB_OUT で変更可
 ```
 
+> Web UI はローカル単一ユーザー向けで、認証機能はありません。既定の `127.0.0.1` のまま使用し、インターネットへ直接公開しないでください。別ホストへ公開する場合は、認証・TLS・アクセス制御を備えたリバースプロキシで保護してください。
+
 ### 画面の流れ
 
 1. 制作名と台本（SSML / Markdown / プレーンテキスト）を入力し、必要なら参照声音を追加
@@ -149,7 +166,11 @@ uv run voxcpm-narrate-web
 3. 制作を保存し、未生成部分や選択した箇所を試聴生成
 4. セグメントごとに本文・読み・話し方を編集し、候補を試聴してから採用（採用前の音声は保持）
 5. 生成中にブラウザを閉じても制作は SQLite に保存。再起動後はライブラリから中断箇所を再開
-6. 全体 WAV、ピークを -1 dB に揃えた WAV、制作データを含む ZIP をダウンロード
+6. 原音 WAV、音量・文間を整えた WAV、制作データや測定結果を含む ZIP をダウンロード
+
+既存の CLI run はライブラリ画面から制作として取り込み、Web 上で編集・再生成できます。
+
+生成前に未知語候補を抽出し、読みを確定してから生成できます。Web の「この制作の読み辞書」または `uv run python -m voxcpm_narrate.pronunciation path/to/script.txt` を使います。
 
 参照声音は任意です。指定した場合は制作ごとにコピー・変換して保存し、元ファイルを移動しても再生成できます。入力内容や候補を含む制作データは `VOXCPM_WEB_OUT` 以下に保存されます。
 
@@ -168,8 +189,13 @@ Web UI は次の API を使用します。API キーは制作 JSON や SQLite �
 | `POST /api/jobs/{id}/generate` | 未生成または選択セグメントをキューに入れる |
 | `POST /api/jobs/{id}/cancel` | セグメント境界で中断 |
 | `PATCH /api/jobs/{id}/segments/{segment}` | 版番号を検証して編集を保存 |
+| `PUT /api/jobs/{id}/dictionary` | 制作ごとの読み辞書を保存 |
+| `POST /api/jobs/{id}/pronunciation-candidates` | 読み確認が必要な未知語候補を抽出 |
 | `POST .../regenerate` / `.../adopt` | 候補を作り、試聴後に採用・元に戻す |
-| `GET /api/jobs/{id}/archive` | WAV・章別音声・台本・条件を ZIP で保存 |
+| `POST .../audio-judge` | 音声版に対する改善提案を取得 |
+| `GET /api/jobs/{id}/download?normalize=true` | 文間・音量を整えた WAV を保存 |
+| `GET /api/jobs/{id}/archive?normalize=true` | 仕上げ WAV・測定値・原音などを ZIP で保存 |
+| `GET /api/legacy-runs` / `POST /api/import` | CLI run を検索して制作へ取り込む |
 
 音声評価を OpenRouter に送る場合は、画面に示す送信内容を確認してください。「音声を聴いて改善提案」の結果は音声版に紐づけて保存し、提案の取り込み・再生成・採用を個別に操作できます。生成時の自己改善ループは、条件を満たした候補を自動採用します。
 
@@ -261,6 +287,60 @@ cp examples/script.ssml workspace/script.ssml
 
 ---
 
+## 日本語の読みと音声の仕上げ
+
+### 読み上げ入力
+
+既定の `--normalize` は**音量の正規化ではなく、日本語の数字・日付・時刻・金額・割合を読みへ展開する指定**です。日本語の本文は VoxCPM の中国語・英語用 `TextNormalizer` に渡さず、長音、漢字、かな、句読点と、読み辞書や SSML `<sub alias>` で確定した本文を保持します。
+
+```zsh
+# 読み確認が必要な語を JSON で抽出（読みは自動で推測しません）
+uv run python -m voxcpm_narrate.pronunciation workspace/script.txt
+
+# 保存済み辞書の語を候補から除外
+uv run python -m voxcpm_narrate.pronunciation workspace/script.txt \
+  --dictionary workspace/dictionary.json
+```
+
+CLI 生成では、モデルへ実際に渡した文字列、入力処理バージョン、モデル revision、実行環境を `segments/*.input.json` に記録します。Web UI では候補ごとの制作データに同じ情報を保存します。
+
+### 原音を保持した仕上げ
+
+生成した原音は FLOAT WAV のまま変更しません。仕上げ処理は、セグメント前後の余分な無音、指定した文間、文ごとの音量差を控えめに整えた後、全体を暫定目標 **−16 LUFS / −1 dBTP 以下**に調整し、別の PCM_24 WAV と測定 JSON を作ります。入力がすでに十分大きい場合は、音量を下げない適応目標を使います。
+
+```zsh
+# 測定のみ
+uv run python -m voxcpm_narrate.audio_quality \
+  output/voxcpm2/latest/full.wav
+
+# 文間・音量を仕上げ、finished.wav と finished.quality.json を作成
+uv run python -m voxcpm_narrate.audio_quality \
+  output/voxcpm2/latest/full.wav \
+  --manifest output/voxcpm2/latest/manifest.json \
+  --segments-dir output/voxcpm2/latest/segments \
+  --output output/voxcpm2/latest/finished.wav
+```
+
+無音、極端に小さい音声、3秒未満の音声は過剰増幅せずエラーにします。目標値は本アプリの試聴用設定であり、汎用の納品規格ではありません。
+
+### 品質の A/B 比較
+
+`benchmarks/japanese-quality.json` の30文と固定 seed を使い、従来の入力正規化と現在の日本語入力を比較できます。既定ではモデルをダウンロードせず、ローカルキャッシュだけを使用します。
+
+```zsh
+# モデルをロードせず、変換後の入力文字列だけを比較
+uv run python -m voxcpm_narrate.quality_benchmark \
+  benchmarks/japanese-quality.json output/quality-input --prepare-only
+
+# 3文・seed 42 の小規模な実音声比較
+uv run python -m voxcpm_narrate.quality_benchmark \
+  benchmarks/japanese-quality.json output/quality-pilot --limit 3 --seeds 42
+```
+
+生成条件、入力差分、原音、RMS を合わせたブラインド試聴用 A/B、音響測定値を保存します。機械測定から主観評価点を作ることはありません。入力処理や音量調整だけでイントネーション改善が実証されたとは扱わず、実音声のブラインド試聴で評価してください。
+
+---
+
 ## 音声合成
 
 ### 成果物
@@ -268,7 +348,8 @@ cp examples/script.ssml workspace/script.ssml
 ```text
 output/voxcpm2/run_YYYYMMDD_HHMMSS/
   full.wav           # 結合済み読み上げ
-  segments/          # セグメント単位 WAV
+  segments/          # セグメント単位の原音 FLOAT WAV
+    *.input.json     # モデルへ渡した入力と実行情報
   manifest.json      # 分割テキスト・ポーズ・スタイル
   segments.txt
   reference.wav      # 変換後の参照声音（ある場合）
@@ -326,7 +407,7 @@ ls output/voxcpm2/latest/segments | head
    - **LLM（任意）**: [OpenRouter](https://openrouter.ai/) 経由で台本・ASR・メトリクスから違和感を JSON 判定
 2. 総合スコアが閾値未満（既定 `0.62`）を **awkward** とみなす  
 3. 戦略を順に試す（最大 `--max-rounds` 回）  
-   - seed 変更 / CFG 下げ / 話し方プロンプト / diffusion steps 増やす / normalize 切替 など  
+   - seed 変更 / CFG 下げ / 話し方プロンプト / diffusion steps 増やす など。日本語の入力は読みを保持し、中国語・英語用のテキスト正規化には渡しません。
 4. 最良候補のスコアが上がればセグメント WAV を置換（元は `harness/originals/` に退避）  
 5. 全セグメントから `full.wav` を再結合  
 6. `harness/report.json` と `harness/summary.md` を出力  
@@ -341,7 +422,7 @@ ls output/voxcpm2/latest/segments | head
 ./improve_speech.zsh --asr
 
 # ASR + OpenRouter LLM
-export OPENROUTER_API_KEY=sk-or-v1-...
+export OPENROUTER_API_KEY='your-key-here'
 ./improve_speech.zsh --asr --llm-judge --llm-model openai/gpt-4o-mini
 
 # 評価だけ（再生成しない）
@@ -351,7 +432,7 @@ export OPENROUTER_API_KEY=sk-or-v1-...
 ./improve_speech.zsh --asr --segment-id 03_002 --max-rounds 4
 
 # 別 run を指定
-./improve_speech.zsh --run-dir output/voxcpm2/run_20260915_140643 --asr
+./improve_speech.zsh --run-dir output/voxcpm2/run_YYYYMMDD_HHMMSS --asr
 ```
 
 OpenRouter のキーは `.env`（Web UI が読込）または環境変数で渡せます。Web UI では設定パネルからモデル選択もできます。
@@ -412,6 +493,9 @@ uv run voxcpm-narrate improve \
 | `uv run voxcpm-narrate synthesize ...` | 合成を直接実行 |
 | `uv run voxcpm-narrate improve ...` | 改善を直接実行 |
 | `uv run voxcpm-narrate-web` | Web UI を直接起動 |
+| `uv run python -m voxcpm_narrate.pronunciation ...` | 未知語候補を抽出 |
+| `uv run python -m voxcpm_narrate.audio_quality ...` | WAV を測定・仕上げ |
+| `uv run python -m voxcpm_narrate.quality_benchmark ...` | 日本語入力を A/B 比較 |
 
 ### 合成オプション（抜粋）
 
@@ -420,17 +504,24 @@ uv run voxcpm-narrate improve \
 | `--input PATH` | 台本 |
 | `--mode auto\|markdown\|plain\|lines\|ssml` | パーサ（既定 auto） |
 | `--reference PATH` | 参照声音 |
-| `--no-reference` | クローニングしない |
+| `--no-reference` | クローニングしない（`generate_speech.zsh` のみ） |
+| `--out-root DIR` | run の出力ルート |
+| `--model-id ID` | Hugging Face のモデル ID |
 | `--device auto\|cpu\|mps\|cuda` | 推論デバイス |
 | `--control TEXT` | 話速・雰囲気などの制御 |
+| `--no-control` | 話し方の制御文を付けない |
 | `--section N` | N 番目セクションのみ |
 | `--limit N` | 先頭 N セグメントのみ |
 | `--max-chars N` | 1 セグメント最大文字数（既定 120） |
 | `--cfg VALUE` | CFG（既定 2.0） |
 | `--timesteps N` | diffusion steps（既定 10） |
 | `--seed N` | 乱数シード |
+| `--no-normalize` | 日本語の数字・日付・単位を読みへ展開しない |
+| `--optimize` | `torch.compile` を有効化（主に CUDA 向け） |
 | `--dry-run` | 抽出・分割のみ（モデル不要） |
 | `--setup` | `uv sync` のみ |
+
+上表の `--cfg` と `--timesteps` はシェルスクリプト用です。`uv run voxcpm-narrate synthesize` / `improve` を直接使う場合は、それぞれ `--cfg-value` と `--inference-timesteps` を指定します。直接実行では参照声音を省略するだけで Voice Design になり、出力先を固定する `--output-dir` も利用できます。全オプションは各コマンドの `--help` で確認できます。
 
 ---
 
@@ -473,6 +564,8 @@ cp /path/to/voice.wav workspace/source.wav
 | ASR 初回が遅い | SenseVoice のダウンロード中。完了後はキャッシュ利用 |
 | LLM 判定が効かない | `OPENROUTER_API_KEY` / Web UI の API キーとモデル ID を確認。課金・モデル公開状態も確認 |
 | 改善で置換されない | 候補スコアが元より十分に上がっていない。`--max-rounds` を増やすか `--threshold` を調整 |
+| 仕上げ WAV を作れない | `ffmpeg` を確認。無音・極小音量・3秒未満は安全のため仕上げ対象外 |
+| 数字の読みを変えたくない | `--no-normalize`。固有名詞は Web の読み辞書または SSML `<sub alias>` で指定 |
 
 ---
 

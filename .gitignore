@@ -13,6 +13,7 @@ htmlcov/
 dist/
 build/
 *.egg
+docs/
 
 # OS / editor
 .DS_Store
@@ -47,10 +48,14 @@ generate.log
 !/workspace/.gitkeep
 !/workspace/README.md
 
-# Generated audio outside examples/
+# Local/private audio recordings
 /*.wav
 /*.flac
-!examples/**
+/examples/*.wav
+/examples/*.ogg
+/examples/*.mp3
+/examples/*.flac
+/examples/*.m4a
 
 # Model / Hugging Face caches
 .cache/

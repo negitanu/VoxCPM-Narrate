@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.background import BackgroundTask
 
+from voxcpm_narrate import __version__
 from voxcpm_narrate.artifacts import file_hash
 from voxcpm_narrate.harness.judge import (
     OPENROUTER_MODELS,
@@ -44,7 +45,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 DEFAULT_OUT = Path(os.environ.get("VOXCPM_WEB_OUT", "output/voxcpm2/web_jobs")).resolve()
 manager = JobManager(DEFAULT_OUT)
 service = ProductionService(manager)
-app = FastAPI(title="VoxCPM Narrate", version="0.2.0")
+app = FastAPI(title="VoxCPM Narrate", version=__version__)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -54,7 +55,7 @@ class Validated(BaseModel):
 
 class Config(Validated):
     device: Literal["auto", "cpu", "mps", "cuda"] = "auto"
-    control: str = Field(default="ややゆっくり、落ち着いたプレゼン説明調", max_length=1000)
+    control: str = Field(default="日本語、明瞭な声、自然な抑揚、会話に近いテンポ", max_length=1000)
     max_chars: int = Field(default=120, ge=10, le=500)
     cfg_value: float = Field(default=2, ge=0.1, le=5)
     timesteps: int = Field(default=10, ge=1, le=100)
@@ -99,6 +100,10 @@ class SegmentOperation(Operation):
 
 class DictionaryBody(Validated):
     entries: dict[str, str]
+
+
+class PronunciationBody(Validated):
+    script: str | None = Field(default=None, max_length=200000)
 
 
 class ImportBody(Validated):
@@ -270,6 +275,11 @@ def dictionary(jid: str, body: DictionaryBody):
     return public(manager.mutate(jid, change))
 
 
+@app.post("/api/jobs/{jid}/pronunciation-candidates")
+def pronunciation_candidates(jid: str, body: PronunciationBody):
+    return {"candidates": service.pronunciation_candidates(jid, body.script)}
+
+
 @app.post("/api/jobs/{jid}/generate")
 def generate(jid: str, body: Operation):
     def validate(job):
@@ -373,13 +383,13 @@ def download_segment(jid: str, sid: str, version_id: str | None = None):
 @app.get("/api/jobs/{jid}/download")
 def download(jid: str, normalize: bool = False):
     wav = service.export_audio(jid, normalize=normalize)
-    suffix = "_peak_minus_1db" if normalize else ""
+    suffix = "_finished" if normalize else ""
     return FileResponse(wav, media_type="audio/wav", filename=f"narration_{jid}{suffix}.wav")
 
 
 @app.get("/api/jobs/{jid}/archive")
-def archive(jid: str):
-    path = service.export_zip(jid)
+def archive(jid: str, normalize: bool = False):
+    path = service.export_zip(jid, normalize=normalize)
     return FileResponse(
         path,
         media_type="application/zip",

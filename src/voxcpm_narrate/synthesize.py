@@ -60,18 +60,32 @@ def prepare_reference_wav(reference: Path, output_wav: Path) -> Path:
 
 
 def load_model(model_id: str, *, device: str, optimize: bool):
+    import importlib.metadata
+    import platform
+
+    from huggingface_hub import snapshot_download
     from voxcpm import VoxCPM
 
     # Patch after import: VoxCPM binds `from tqdm import tqdm` at module load.
     ensure_rich_tqdm()
 
     log(f"[bold]Loading model:[/bold] {model_id} (device={device}, optimize={optimize})")
+    resolved = Path(model_id) if Path(model_id).is_dir() else Path(snapshot_download(repo_id=model_id))
     model = VoxCPM.from_pretrained(
-        model_id,
+        str(resolved),
         load_denoiser=False,
         device=device,
         optimize=optimize,
     )
+    model.revision = resolved.name if resolved.parent.name == "snapshots" else None
+    model.narrate_provenance = {
+        "model_revision": model.revision,
+        "model_source": str(resolved),
+        "device": str(getattr(model.tts_model, "device", device)),
+        "python": platform.python_version(),
+        "libraries": {name: importlib.metadata.version(name)
+                      for name in ("voxcpm", "torch", "numpy", "soundfile")},
+    }
     return model
 
 
@@ -85,15 +99,23 @@ def generate_wav(
     inference_timesteps: int,
     normalize: bool,
     seed: int | None,
+    input_metadata: dict | None = None,
+    output_language: str = "ja",
 ):
     ensure_rich_tqdm()
     import numpy as np
 
+    from voxcpm_narrate.text_input import prepare_input
+
+    prepared = prepare_input(text, control, normalize, language=output_language)
+    if input_metadata is not None:
+        input_metadata.update(prepared)
+        input_metadata["runtime"] = getattr(model, "narrate_provenance", None)
     kwargs: dict[str, Any] = {
-        "text": wrap_control(text, control),
+        "text": prepared["model_input"],
         "cfg_value": cfg_value,
         "inference_timesteps": inference_timesteps,
-        "normalize": normalize,
+        "normalize": False,
         "retry_badcase": True,
     }
     if reference_audio:
@@ -184,8 +206,6 @@ def synthesize(
         log(f"[yellow]dry-run[/yellow] lines={lines_path}")
         return output_dir / "full.wav"
 
-    import soundfile as sf
-
     if reference_audio:
         ref_path = Path(reference_audio)
         if not ref_path.is_file():
@@ -234,6 +254,7 @@ def synthesize(
                     segment_id=str(job["id"]),
                 )
 
+            input_metadata = {}
             wav = generate_wav(
                 model,
                 text=str(job["text"]),
@@ -243,8 +264,12 @@ def synthesize(
                 inference_timesteps=inference_timesteps,
                 normalize=normalize,
                 seed=seed,
+                input_metadata=input_metadata,
             )
-            sf.write(seg_path, wav, sample_rate)
+            from voxcpm_narrate.artifacts import write_json, write_wav
+
+            write_wav(seg_path, wav, sample_rate)
+            write_json(seg_path.with_suffix(".input.json"), input_metadata)
             progress.advance(task_id)
 
             if progress_callback:

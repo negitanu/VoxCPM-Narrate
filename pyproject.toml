@@ -35,9 +35,6 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/voxcpm_narrate"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"src/voxcpm_narrate/web/static" = "voxcpm_narrate/web/static"
-
 [tool.hatch.build.targets.sdist]
 include = [
   "src/voxcpm_narrate",
@@ -45,6 +42,7 @@ include = [
   "LICENSE",
   "pyproject.toml",
   "examples",
+  "benchmarks",
   "workspace/README.md",
   "workspace/.gitkeep",
   "generate_speech.zsh",

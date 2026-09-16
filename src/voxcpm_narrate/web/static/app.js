@@ -160,6 +160,7 @@
     $("exports").classList.toggle("hidden",!job.export);
     $("export-note").textContent = job.export ? `採用済みの音声を結合 · ${(job.duration_sec/60).toFixed(1)}分。未採用の候補や編集内容は含みません。` : "すべてのセグメントを生成・採用すると書き出せます。";
     $("download").href = `/api/jobs/${job.id}/download`; $("download-normalized").href = `/api/jobs/${job.id}/download?normalize=true`; $("archive").href = `/api/jobs/${job.id}/archive`;
+    $("archive-finished").href = `/api/jobs/${job.id}/archive?normalize=true`;
   }
   async function poll() {
     if(!job || polling) return;
@@ -219,6 +220,12 @@
     const entries={};for(const line of $("dictionary").value.split("\n").filter(l=>l.trim())) {const index=line.indexOf("=");if(index<1)throw new Error("読み辞書は「表記=読み」の形式で入力してください");entries[line.slice(0,index).trim()]=line.slice(index+1).trim();}
     render(await api(`/api/jobs/${job.id}/dictionary`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({entries})}));notice("読み辞書を保存しました。次の生成から適用されます。");
   });
+  $("find-pronunciations").onclick = () => action(async()=>{
+    const data = await api(`/api/jobs/${job.id}/pronunciation-candidates`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})});
+    const pending = data.candidates.filter(c=>c.status==="review");
+    $("pronunciation-candidates").textContent = pending.length ? `確認候補: ${pending.map(c=>`${c.term}（${c.script}）`).join("、")}` : "確認が必要な候補はありません。";
+    if(pending.length){const existing=$("dictionary").value.trim();const lines=pending.map(c=>`${c.term}=`);$("dictionary").value=[existing,...lines].filter(Boolean).join("\n");notice("候補を辞書欄へ追加しました。読みを入力して保存してください。");}
+  });
   $("fork-script").onclick = () => {const text=job.script, title=job.title,mode=job.mode;$("new-job").click();$("script").value=text;$("title").value=title+"（改訂）";$("mode").value=mode;saveSetup();notice("台本全体の改訂は新しい制作として保存します。元の制作と音声は保持されます。参照音声は再選択してください。");$("reference").value="";$("reference-player").classList.add("hidden");};
   function playOne(sid,vid,continuous=false) {
     if(!continuous) sequence=[];
@@ -231,6 +238,33 @@
   $("audio").onended = () => {const next=sequence.shift();if(next)playOne(...next,true);else for(const row of $("segments").children)row.classList.remove("playing");};
   $("stop").onclick = () => {sequence=[];$("audio").pause();$("audio").currentTime=0;};
   $("play-full").onclick = () => {sequence=[];$("audio").src=`/api/jobs/${job.id}/download?v=${job.export.id}`;$("player-label").textContent="全体音声";$("player-detail").textContent=job.title;$("audio").play().catch(err=>notice(err.message,true));};
+  let finishedAudioUrl = null;
+  async function finishedBlob(url) {
+    notice("音量と文間を調整しています。初回は少し時間がかかります。");
+    const response = await fetch(url);
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || "仕上げに失敗しました。原音は保持されています。");
+    }
+    return URL.createObjectURL(await response.blob());
+  }
+  $("play-finished").onclick = () => action(async () => {
+    const jid = job.id, exportId = job.export.id, title = job.title;
+    const url = await finishedBlob(`/api/jobs/${jid}/download?normalize=true`);
+    if (job.id !== jid || job.export?.id !== exportId) {URL.revokeObjectURL(url);return;}
+    if (finishedAudioUrl) URL.revokeObjectURL(finishedAudioUrl);
+    finishedAudioUrl = url; sequence=[]; $("audio").src=url;
+    $("player-label").textContent="仕上げ後の全体音声";$("player-detail").textContent=title;
+    await $("audio").play();notice("仕上げ後の音声を再生します");
+  });
+  for (const [id, suffix] of [["download-normalized", "wav"], ["archive-finished", "zip"]]) {
+    $(id).onclick = event => {event.preventDefault();const url=$(id).href,jid=job.id;action(async () => {
+      const objectUrl = await finishedBlob(url), link=document.createElement("a");
+      link.href=objectUrl;link.download=`narration_${jid}_finished.${suffix}`;
+      document.body.append(link);link.click();link.remove();
+      setTimeout(()=>URL.revokeObjectURL(objectUrl),60000);notice("仕上げ音声を書き出しました");
+    });};
+  }
   $("clear-key").onclick = () => {$("api-key").value="";localStorage.removeItem("voxcpm.openrouter.api_key");notice("入力キーと旧 localStorage キーを消去しました");};
   function fillModels(models) {const previous=$("llm-model").value;$("llm-model").replaceChildren(...models.map(m=>{const o=document.createElement("option");o.value=m.id;o.textContent=`${m.name || m.id}${m.supportsAudio?" · 音声入力対応":""}`;return o;}));if(models.some(m=>m.id===previous))$("llm-model").value=previous;}
   $("refresh-models").onclick = () => action(async()=>{const data=await api("/api/llm/models",{headers:{"X-API-Key":$("api-key").value.trim()}});fillModels(data.models);notice(`${data.models.length} モデルを取得しました`);});

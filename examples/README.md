@@ -3,6 +3,10 @@
 Tracked templates for portable use. Your real scripts and reference voices
 belong in `workspace/` (gitignored).
 
+All example text is fictional and intentionally generic. Do not place real
+production scripts, personal information, customer data, or recorded voices in
+this directory.
+
 | File | Description |
 |------|-------------|
 | `script.md` | Markdown template with `### 読み上げ本文` blocks |

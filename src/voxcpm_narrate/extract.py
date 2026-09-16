@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 
 SECTION_HEADER_RE = re.compile(r"^##\s+")
-SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？.!?])\s*")
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？!?])\s*|(?<=\.)(?!\d)\s+")
 DEFAULT_PAUSE_MARKERS = (
     "一つ目",
     "二つ目",
@@ -168,7 +168,9 @@ def split_into_segments(text: str, *, max_chars: int) -> list[str]:
         while len(segment) > max_chars:
             prefix = segment[:max_chars]
             boundaries = list(re.finditer(r"[、,;；：:\s]", prefix))
-            cut = boundaries[-1].end() if boundaries else max_chars
+            # Avoid a tiny fragment when the only comma is near the beginning.
+            useful = [b for b in boundaries if b.end() >= max_chars // 2]
+            cut = useful[-1].end() if useful else max_chars
             bounded.append(segment[:cut])
             segment = segment[cut:]
         if segment:

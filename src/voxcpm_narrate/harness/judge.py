@@ -140,7 +140,7 @@ class LlmJudge:
         self.api_key = api_key if api_key is not None else default_llm_api_key()
         self.timeout_sec = timeout_sec
         self.http_referer = http_referer or os.environ.get(
-            "OPENROUTER_HTTP_REFERER", "https://github.com/OpenBMB/VoxCPM"
+            "OPENROUTER_HTTP_REFERER", "https://github.com/negitanu/VoxCPM-Narrate"
         )
         self.app_title = app_title
 
@@ -237,7 +237,7 @@ def fetch_openrouter_models(*, api_key: str, base_url: str | None = None) -> lis
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "HTTP-Referer": os.environ.get(
-                "OPENROUTER_HTTP_REFERER", "https://github.com/OpenBMB/VoxCPM"
+                "OPENROUTER_HTTP_REFERER", "https://github.com/negitanu/VoxCPM-Narrate"
             ),
             "X-Title": "voxcpm-narrate",
         },

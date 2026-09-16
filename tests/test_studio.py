@@ -2,6 +2,7 @@
 
 import io
 import json
+import shutil
 import tempfile
 import threading
 import unittest
@@ -66,6 +67,47 @@ class StudioTests(unittest.TestCase):
 
     def test_error_logging_does_not_raise(self):
         log_error("expected test error")
+
+    def test_generation_records_prepared_input_and_float_audio(self):
+        job = self.run_all(self.create("消費税は10%です。")['id'])
+        seg = job["segments"][0]
+        candidate = version(seg)
+        self.assertIn("じゅうパーセント", candidate["model_input"])
+        self.assertIn("speaking Japanese", candidate["model_input"])
+        self.assertEqual(candidate["text_preparation"], "japanese-readings")
+        self.assertEqual(sf.info(str(self.service.audio_path(job["id"], seg["id"]))).subtype,
+                         "FLOAT")
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg not installed")
+    def test_finished_zip_chapters_match_finished_full_and_preserve_raw(self):
+        import zipfile
+
+        with patch.object(self.service._model, "generate", return_value=(
+                np.sin(np.arange(64000) * .1).astype("float32") * .1)):
+            job = self.run_all(self.create()["id"])
+        jid = job["id"]
+        raw = self.client.get(f"/api/jobs/{jid}/download").content
+        finished = self.client.get(f"/api/jobs/{jid}/download?normalize=true")
+        self.assertEqual(finished.status_code, 200, finished.text[:200] if finished.status_code != 200 else "")
+        result = self.client.get(f"/api/jobs/{jid}/archive?normalize=true")
+        self.assertEqual(result.status_code, 200)
+        with zipfile.ZipFile(io.BytesIO(result.content)) as archive:
+            self.assertEqual(archive.read("originals/full.wav"), raw)
+            self.assertEqual(archive.read("full.wav"), finished.content)
+            full, sr = sf.read(io.BytesIO(archive.read("full.wav")))
+            chapter, chapter_sr = sf.read(io.BytesIO(archive.read("chapters/01.wav")))
+            self.assertEqual(sr, chapter_sr)
+            np.testing.assert_array_equal(full, chapter)
+            quality = json.loads(archive.read("quality.json"))
+            self.assertLessEqual(abs(quality["after"]["integrated_lufs"] + 16), 1)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg not installed")
+    def test_short_audio_finishing_explains_error_but_raw_is_available(self):
+        job = self.run_all(self.create("短文です。")["id"])
+        result = self.client.get(f"/api/jobs/{job['id']}/download?normalize=true")
+        self.assertEqual(result.status_code, 400)
+        self.assertIn("3秒", result.json()["detail"])
+        self.assertEqual(self.client.get(f"/api/jobs/{job['id']}/download").status_code, 200)
 
     def test_split_preserves_text_and_enforces_bound(self):
         for text in ["あ" * 80, "長い文章、" * 30, "A sentence, with words. " * 10]:
