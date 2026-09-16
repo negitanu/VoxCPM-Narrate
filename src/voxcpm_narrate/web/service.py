@@ -22,7 +22,14 @@ from voxcpm_narrate.harness.loop import evaluate_segment
 from voxcpm_narrate.harness.strategies import GenParams, build_strategies
 from voxcpm_narrate.pronunciation import find_unknown_words
 from voxcpm_narrate.synthesize import assemble_full_wav, generate_wav, load_model
-from voxcpm_narrate.web.jobs import ACTIVE, Conflict, JobManager, new_job, now
+from voxcpm_narrate.web.jobs import (
+    ACTIVE,
+    Conflict,
+    JobManager,
+    new_job,
+    now,
+    safe_job_snapshot,
+)
 
 
 def parse_script(script: str, mode: str, max_chars: int, control: str) -> list[dict]:
@@ -104,6 +111,16 @@ class ProductionService:
         self.manager.job_dir(job["id"])
         return self.manager.save(job)
 
+    def _reference_audio(self, jid: str, config: dict) -> str | None:
+        reference = config.get("reference_audio")
+        if not reference:
+            return None
+        root = self.manager.job_dir(jid).resolve()
+        path = (root / reference).resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            return None
+        return str(path)
+
     def edit(self, jid: str, sid: str, expected: int, draft: dict):
         def change(job):
             check_idle(job)
@@ -170,7 +187,7 @@ class ProductionService:
         spoken = self._spoken(draft, job["dictionary"])
         started = time.monotonic()
         input_metadata = {}
-        wav = generate_wav(model, text=spoken, reference_audio=cfg.get("reference_audio"),
+        wav = generate_wav(model, text=spoken, reference_audio=self._reference_audio(jid, cfg),
                            input_metadata=input_metadata, **params)
         sr = int(model.tts_model.sample_rate)
         vid = uuid.uuid4().hex[:16]
@@ -432,9 +449,12 @@ class ProductionService:
                 archive.write(folder / "full.wav", "originals/full.wav")
             archive.write(folder / "manifest.json", "manifest.json")
             archive.writestr("script.txt", job["script"])
-            archive.writestr("production.json", json.dumps(job, ensure_ascii=False, indent=2))
-            reference = job["config"].get("reference_audio")
-            if reference and Path(reference).is_file():
+            archive.writestr(
+                "production.json",
+                json.dumps(safe_job_snapshot(job), ensure_ascii=False, indent=2),
+            )
+            reference = self._reference_audio(jid, job["config"])
+            if reference:
                 archive.write(reference, "reference.wav")
             chapters = {}
             for item in json.loads((folder / "manifest.json").read_text()):

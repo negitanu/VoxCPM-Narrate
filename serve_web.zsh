@@ -1,5 +1,5 @@
 #!/usr/bin/env zsh
-# serve_web.zsh — Material Design Web UI for VoxCPM Narrate
+# serve_web.zsh — Material-inspired Web UI for VoxCPM Narrate
 #
 #   ./serve_web.zsh
 #   VOXCPM_WEB_PORT=8080 ./serve_web.zsh

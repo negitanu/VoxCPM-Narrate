@@ -24,7 +24,7 @@ from voxcpm_narrate.harness.judge import (
     fetch_openrouter_models,
 )
 from voxcpm_narrate.synthesize import prepare_reference_wav
-from voxcpm_narrate.web.jobs import ACTIVE, Conflict, JobManager
+from voxcpm_narrate.web.jobs import ACTIVE, Conflict, JobManager, safe_job_snapshot
 from voxcpm_narrate.web.service import (
     ProductionService,
     check_idle,
@@ -228,18 +228,21 @@ def create_job(
 
                 write_wav(prepared, wav.mean(axis=1), sr)
                 warnings.append("参照音声をモノラルに変換しました")
-            cfg.update(reference_audio=str(prepared), reference_sha256=file_hash(prepared))
+            cfg.update(reference_audio="reference.wav", reference_sha256=file_hash(prepared))
             job = manager.update(job["id"], config=cfg, reference_warnings=warnings)
         except Exception as exc:
             manager.update(
-                job["id"], status="error", error=str(exc), message="参照音声を読み込めませんでした"
+                job["id"],
+                status="error",
+                error=type(exc).__name__,
+                message="参照音声を読み込めませんでした",
             )
-            raise ValueError(str(exc)) from exc
+            raise ValueError("参照音声を読み込めませんでした") from exc
     return public(job)
 
 
 def public(job):
-    result = dict(job)
+    result = safe_job_snapshot(job)
     result["total"] = len(job["segments"])
     result["current"] = sum(bool(s["accepted"]) for s in job["segments"])
     result["percent"] = round(100 * result["current"] / max(1, result["total"]), 1)
@@ -291,7 +294,7 @@ def generate(jid: str, body: Operation):
         if job["config"]["improve_llm"] and not (body.api_key or default_llm_api_key()):
             raise ValueError("LLM 評価には API キーが必要です")
         reference_path = job["config"].get("reference_audio")
-        if reference_path and not Path(reference_path).is_file():
+        if reference_path and service._reference_audio(jid, job["config"]) is None:
             raise ValueError("保存された参照音声が見つかりません")
 
     job = manager.submit(
@@ -428,7 +431,7 @@ def import_run(body: ImportBody):
     ref = path / "reference.wav"
     if ref.is_file():
         dst = prepare_reference_wav(ref, manager.job_dir(job["id"]) / "reference.wav")
-        cfg.update(reference_audio=str(dst), reference_sha256=file_hash(dst))
+        cfg.update(reference_audio="reference.wav", reference_sha256=file_hash(dst))
     import soundfile as sf
     from voxcpm_narrate.artifacts import write_wav
     from voxcpm_narrate.web.jobs import now
@@ -462,13 +465,24 @@ def import_run(body: ImportBody):
 
 
 def main():
+    import ipaddress
     import uvicorn
     from voxcpm_narrate.console import ensure_rich_tqdm
 
     ensure_rich_tqdm()
+    host = os.environ.get("VOXCPM_WEB_HOST", "127.0.0.1")
+    try:
+        loopback = host.lower() == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = False
+    if not loopback and os.environ.get("VOXCPM_ALLOW_REMOTE") != "1":
+        raise SystemExit(
+            "認証のない Web UI は既定でローカル接続だけを許可します。"
+            "外部公開を保護した場合のみ VOXCPM_ALLOW_REMOTE=1 を設定してください。"
+        )
     uvicorn.run(
         "voxcpm_narrate.web.app:app",
-        host=os.environ.get("VOXCPM_WEB_HOST", "127.0.0.1"),
+        host=host,
         port=int(os.environ.get("VOXCPM_WEB_PORT", "7860")),
         reload=False,
     )

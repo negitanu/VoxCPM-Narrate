@@ -18,7 +18,7 @@
 1. [ディレクトリ構成](#ディレクトリ構成)
 2. [必要環境](#必要環境)
 3. [クイックスタート](#クイックスタート)
-4. [Web UI（Material Design）](#web-uimaterial-design)
+4. [Web UI](#web-ui)
 5. [参照声音の用意](#参照声音の用意)
 6. [入力形式](#入力形式)
 7. [日本語の読みと音声の仕上げ](#日本語の読みと音声の仕上げ)
@@ -39,7 +39,7 @@
 ├── pyproject.toml / uv.lock / .python-version
 ├── generate_speech.zsh          # 合成エントリ
 ├── improve_speech.zsh           # 自己改善ループ
-├── serve_web.zsh                # Material Design Web UI
+├── serve_web.zsh                # Material風 Web UI
 ├── src/voxcpm_narrate/          # Python パッケージ
 │   ├── extract.py / ssml.py     # 台本パース
 │   ├── synthesize.py            # VoxCPM2 合成
@@ -50,7 +50,7 @@
 │   ├── audio_quality.py         # 音量測定・仕上げ
 │   ├── quality_benchmark.py     # 再現可能な A/B 比較
 │   ├── harness/                 # 採点・再生成ループ
-│   └── web/                     # FastAPI + Material UI
+│   └── web/                     # FastAPI + 自前CSS/JavaScript
 ├── benchmarks/
 │   └── japanese-quality.json    # 公開可能な日本語30文
 ├── examples/
@@ -141,9 +141,10 @@ cp /path/to/recording.wav workspace/source.wav
 
 ---
 
-## Web UI（Material Design）
+## Web UI
 
 参照声音と SSML をブラウザからアップロードして、進捗を見ながら音声を生成できます。
+画面は Material Design に着想を得た自前の CSS / JavaScript で構成しています。
 
 ```zsh
 ./serve_web.zsh
@@ -157,7 +158,7 @@ uv run voxcpm-narrate-web
 # VOXCPM_WEB_HOST / VOXCPM_WEB_PORT / VOXCPM_WEB_OUT で変更可
 ```
 
-> Web UI はローカル単一ユーザー向けで、認証機能はありません。既定の `127.0.0.1` のまま使用し、インターネットへ直接公開しないでください。別ホストへ公開する場合は、認証・TLS・アクセス制御を備えたリバースプロキシで保護してください。
+> Web UI はローカル単一ユーザー向けで、認証機能はありません。既定の `127.0.0.1` のまま使用し、インターネットへ直接公開しないでください。非 loopback アドレスへの起動は既定で拒否します。認証・TLS・アクセス制御を備えたリバースプロキシで保護した場合に限り、`VOXCPM_ALLOW_REMOTE=1` を明示して起動してください。
 
 ### 画面の流れ
 
@@ -489,7 +490,7 @@ uv run voxcpm-narrate improve \
 |----------|------|
 | `./generate_speech.zsh` | 合成（内部で `uv sync` + `voxcpm-narrate synthesize`） |
 | `./improve_speech.zsh` | 自己改善（内部で `uv sync` + `voxcpm-narrate improve`） |
-| `./serve_web.zsh` | Material Design Web UI（FastAPI） |
+| `./serve_web.zsh` | Material風 Web UI（FastAPI） |
 | `uv run voxcpm-narrate synthesize ...` | 合成を直接実行 |
 | `uv run voxcpm-narrate improve ...` | 改善を直接実行 |
 | `uv run voxcpm-narrate-web` | Web UI を直接起動 |
@@ -566,6 +567,7 @@ cp /path/to/voice.wav workspace/source.wav
 | 改善で置換されない | 候補スコアが元より十分に上がっていない。`--max-rounds` を増やすか `--threshold` を調整 |
 | 仕上げ WAV を作れない | `ffmpeg` を確認。無音・極小音量・3秒未満は安全のため仕上げ対象外 |
 | 数字の読みを変えたくない | `--no-normalize`。固有名詞は Web の読み辞書または SSML `<sub alias>` で指定 |
+| Web UI を外部公開したい | 認証なしのため直接公開しない。保護済みリバースプロキシ配下でのみ `VOXCPM_ALLOW_REMOTE=1` を使用 |
 
 ---
 

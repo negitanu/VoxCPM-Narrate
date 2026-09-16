@@ -70,7 +70,8 @@ def load_model(model_id: str, *, device: str, optimize: bool):
     ensure_rich_tqdm()
 
     log(f"[bold]Loading model:[/bold] {model_id} (device={device}, optimize={optimize})")
-    resolved = Path(model_id) if Path(model_id).is_dir() else Path(snapshot_download(repo_id=model_id))
+    local_model = Path(model_id).is_dir()
+    resolved = Path(model_id) if local_model else Path(snapshot_download(repo_id=model_id))
     model = VoxCPM.from_pretrained(
         str(resolved),
         load_denoiser=False,
@@ -80,7 +81,7 @@ def load_model(model_id: str, *, device: str, optimize: bool):
     model.revision = resolved.name if resolved.parent.name == "snapshots" else None
     model.narrate_provenance = {
         "model_revision": model.revision,
-        "model_source": str(resolved),
+        "model_id": "local-model" if local_model else model_id,
         "device": str(getattr(model.tts_model, "device", device)),
         "python": platform.python_version(),
         "libraries": {name: importlib.metadata.version(name)

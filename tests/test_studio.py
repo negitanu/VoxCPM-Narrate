@@ -18,7 +18,7 @@ from voxcpm_narrate.extract import split_into_segments
 from voxcpm_narrate.harness.judge import LlmJudge, _parse_judgement
 from voxcpm_narrate.synthesize import prepare_reference_wav
 from voxcpm_narrate.web import app as web
-from voxcpm_narrate.web.jobs import Conflict, JobManager
+from voxcpm_narrate.web.jobs import Conflict, JobManager, safe_job_snapshot
 from voxcpm_narrate.web.service import ProductionService, parse_script, version
 
 
@@ -67,6 +67,26 @@ class StudioTests(unittest.TestCase):
 
     def test_error_logging_does_not_raise(self):
         log_error("expected test error")
+
+    def test_public_snapshot_removes_server_paths_and_internal_errors(self):
+        private = "/private/example/model"
+        snapshot = safe_job_snapshot(
+            {
+                "config": {"reference_audio": private, "model_id": private},
+                "error": f"failed at {private}",
+                "segments": [
+                    {
+                        "error": f"failed at {private}",
+                        "versions": [{"runtime": {"model_source": private}}],
+                    }
+                ],
+            }
+        )
+        encoded = json.dumps(snapshot)
+        self.assertNotIn("/private/example", encoded)
+        self.assertNotIn("reference_audio", encoded)
+        self.assertNotIn("model_source", encoded)
+        self.assertEqual(snapshot["config"]["model_id"], "local-model")
 
     def test_generation_records_prepared_input_and_float_audio(self):
         job = self.run_all(self.create("消費税は10%です。")['id'])
@@ -161,6 +181,73 @@ class StudioTests(unittest.TestCase):
         self.assertEqual(job["current"], 0)
         self.assertEqual(len(job["segments"]), 2)
         self.assertIsNone(job["download_url"])
+
+    def test_reference_path_is_internal_and_never_returned(self):
+        recording = io.BytesIO()
+        sf.write(recording, np.zeros(16000 * 6), 16000, format="WAV")
+        recording.seek(0)
+        response = self.client.post(
+            "/api/jobs",
+            data={"script": "参照音声を使います。", "mode": "plain"},
+            files={"reference": ("voice.wav", recording, "audio/wav")},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        public_job = response.json()
+        stored = self.manager.get(public_job["id"])
+        self.assertNotIn("reference_audio", public_job["config"])
+        self.assertEqual(stored["config"]["reference_audio"], "reference.wav")
+        self.assertNotIn(str(Path(self.tmp.name).resolve()), response.text)
+        self.run_all(public_job["id"])
+        archive_response = self.client.get(f"/api/jobs/{public_job['id']}/archive")
+        self.assertEqual(archive_response.status_code, 200)
+        import zipfile
+
+        with zipfile.ZipFile(io.BytesIO(archive_response.content)) as archive:
+            self.assertIn("reference.wav", archive.namelist())
+            production = archive.read("production.json").decode()
+            self.assertNotIn("reference_audio", production)
+            self.assertNotIn(str(Path(self.tmp.name).resolve()), production)
+
+    def test_legacy_absolute_reference_path_is_migrated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = JobManager(root)
+            service = ProductionService(manager)
+            job = service.create(
+                "移行テスト",
+                "本文です。",
+                "plain",
+                {"max_chars": 120, "control": ""},
+                [{"id": "01_001", "section": "本文", "text": "本文です。"}],
+            )
+            reference = manager.job_dir(job["id"]) / "reference.wav"
+            reference.write_bytes(b"test")
+            manager.update(job["id"], config={**job["config"], "reference_audio": str(reference)})
+            manager.close()
+            manager = JobManager(root)
+            try:
+                migrated = manager.get(job["id"])
+                self.assertEqual(migrated["config"]["reference_audio"], "reference.wav")
+                self.assertNotIn(str(root.resolve()), json.dumps(migrated))
+            finally:
+                manager.close()
+
+    def test_remote_bind_requires_explicit_opt_in(self):
+        with patch.dict(
+            web.os.environ,
+            {"VOXCPM_WEB_HOST": "0.0.0.0", "VOXCPM_ALLOW_REMOTE": ""},
+        ):
+            with self.assertRaises(SystemExit):
+                web.main()
+        with (
+            patch.dict(
+                web.os.environ,
+                {"VOXCPM_WEB_HOST": "0.0.0.0", "VOXCPM_ALLOW_REMOTE": "1"},
+            ),
+            patch("uvicorn.run") as run,
+        ):
+            web.main()
+        self.assertEqual(run.call_args.kwargs["host"], "0.0.0.0")
 
     def test_resume_skips_completed_segments(self):
         job = self.create()

@@ -15,6 +15,7 @@ from pathlib import Path
 from voxcpm_narrate.console import log_error
 
 ACTIVE = {"queued", "running", "improving"}
+PRIVATE_FIELDS = {"model_source", "reference_audio"}
 
 
 def now() -> str:
@@ -27,6 +28,29 @@ class Conflict(ValueError):
 
 class Cancelled(Exception):
     pass
+
+
+def safe_job_snapshot(job: dict) -> dict:
+    """Return production metadata without server paths or internal errors."""
+
+    def scrub(value):
+        if isinstance(value, dict):
+            result = {}
+            for key, item in value.items():
+                if key in PRIVATE_FIELDS:
+                    continue
+                if key == "error" and item:
+                    result[key] = "処理に失敗しました。サーバーのログを確認してください。"
+                elif key == "model_id" and isinstance(item, str) and Path(item).is_absolute():
+                    result[key] = "local-model"
+                else:
+                    result[key] = scrub(item)
+            return result
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        return value
+
+    return scrub(copy.deepcopy(job))
 
 
 class JobManager:
@@ -45,6 +69,18 @@ class JobManager:
         self._db.commit()
         # Never silently restart costly operations after a process restart.
         for job in self.list():
+            changed = False
+            reference = job.get("config", {}).get("reference_audio")
+            if reference and Path(reference).is_absolute():
+                expected = self.root / job["id"] / "reference.wav"
+                if Path(reference).resolve() == expected.resolve() and expected.is_file():
+                    job["config"]["reference_audio"] = "reference.wav"
+                else:
+                    job["config"].pop("reference_audio", None)
+                    job.setdefault("reference_warnings", []).append(
+                        "以前の参照音声パスを削除しました。必要に応じて再登録してください"
+                    )
+                changed = True
             if job["status"] in ACTIVE:
                 job.update(
                     status="interrupted",
@@ -56,6 +92,8 @@ class JobManager:
                 for seg in job["segments"]:
                     if seg["status"] in {"running", "regenerating", "judging"}:
                         seg["status"] = "ready" if seg.get("accepted") else "pending"
+                changed = True
+            if changed:
                 self.save(job)
 
     def save(self, job: dict) -> dict:
@@ -165,7 +203,7 @@ class JobManager:
                     status="error",
                     phase="error",
                     operation=None,
-                    error=str(exc),
+                    error=type(exc).__name__,
                     message="処理に失敗しました。保存済み音声は保持されています。",
                 )
                 try:
