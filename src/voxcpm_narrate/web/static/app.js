@@ -118,17 +118,20 @@
       const label = document.createElement("span"); const isAccepted = seg.accepted === v.id;
       label.className = isAccepted ? "adopted" : "";
       const score = v.evaluation ? ` · 評価 ${v.evaluation.overall.toFixed(2)}${v.evaluation.awkward ? " 要確認" : ""}${v.evaluation.llm_reason && v.evaluation.llm_score == null ? "（LLM 未評価）" : ""}` : "";
-      label.textContent = `${isAccepted ? "採用中" : seg.history.includes(v.id) ? "以前の音声" : "候補"} · ${v.duration_sec.toFixed(1)}秒${score}`;
+      const gate = v.content_check;
+      const gateText = gate ? (gate.passed ? " · 音声検査 合格" : " · 音声検査 未合格") : " · 音声検査 未実施";
+      label.textContent = `${isAccepted ? "採用中" : seg.history.includes(v.id) ? "以前の音声" : "候補"} · ${v.duration_sec.toFixed(1)}秒${score}${gateText}`;
       label.title = `${v.text}\n話し方: ${v.control}\n間: ${v.pause_before_sec}秒\n生成日時: ${v.created_at}`;
       const play = document.createElement("button"); play.textContent = "試聴"; play.onclick = () => playOne(seg.id,v.id);
       const adopt = document.createElement("button"); adopt.textContent = isAccepted ? "採用済み" : seg.history.includes(v.id) ? "元に戻す" : "採用";
-      adopt.disabled = isAccepted || busy();
+      adopt.disabled = (isAccepted && !!gate?.passed) || busy() || (!!gate && !gate.passed && !gate.unavailable);
       adopt.onclick = () => action(async () => {
         if(readLocal(draftKey(job.id,seg.id))) throw new Error("未保存の編集があります。先に編集を保存してください。");
         const data = await post(`/api/jobs/${job.id}/segments/${seg.id}/adopt`, {...request(),expected_revision:seg.revision,version_id:v.id}); render(data);
       });
       const details=document.createElement("small");details.className="version-details";
       details.textContent=`${v.text} — 間 ${v.pause_before_sec}秒 / ${v.control || "話し方指定なし"}`;
+      if (gate && !gate.passed) details.textContent += " — " + gate.reasons.join(" / ");
       row.append(label,play,adopt,details); return row;
     }));
   }

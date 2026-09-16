@@ -8,15 +8,18 @@ import json
 import secrets
 import shutil
 import tempfile
+import threading
 import time
 import uuid
 import zipfile
 from pathlib import Path
+from contextlib import nullcontext
 
 from voxcpm_narrate.artifacts import file_hash, write_json, write_wav
 from voxcpm_narrate.extract import load_jobs
 from voxcpm_narrate.harness.audio_judge import AUDIO_JUDGE_SYSTEM, judge_audio_with_openrouter
 from voxcpm_narrate.harness.asr import AsrTranscriber
+from voxcpm_narrate.harness.content_gate import GATE_VERSION, inspect_audio
 from voxcpm_narrate.harness.judge import LlmJudge, default_llm_api_key
 from voxcpm_narrate.harness.loop import evaluate_segment
 from voxcpm_narrate.harness.strategies import GenParams, build_strategies
@@ -26,6 +29,7 @@ from voxcpm_narrate.pronunciation import (
 from voxcpm_narrate.synthesize import assemble_full_wav, generate_wav, load_model
 from voxcpm_narrate.web.jobs import (
     ACTIVE,
+    Cancelled,
     Conflict,
     JobManager,
     new_job,
@@ -83,6 +87,8 @@ class ProductionService:
         self.manager = manager
         self._model = None
         self._model_key = None
+        self._content_asr = AsrTranscriber(device="cpu")
+        self._content_lock = threading.Lock()
 
     def create(self, title, script, mode, config, parsed=None) -> dict:
         jobs = parsed or parse_script(script, mode, config["max_chars"], config["control"])
@@ -289,9 +295,64 @@ class ProductionService:
         self.manager.mutate(jid, record)
         return v
 
+    def verify_content(self, jid, sid, vid):
+        v = version(segment(self.manager.get(jid), sid), vid)
+        path = self.audio_path(jid, sid, vid)
+        digest = file_hash(path)
+        cached = v.get("content_check")
+        if (cached and cached.get("version") == GATE_VERSION
+                and cached.get("sha256") == digest and not cached.get("unavailable")):
+            return cached
+        self.manager.update(jid, message=f"{sid} の原稿一致・日本語を検査しています")
+        try:
+            with self._content_lock:
+                report = inspect_audio(path, [v["spoken_text"], v.get("prepared_reading", "")],
+                                       self._content_asr,
+                                       lambda: self.manager.checkpoint(jid))
+        except Cancelled:
+            raise
+        except Exception as exc:
+            # Infrastructure failures must neither pass nor trigger costly TTS retries.
+            from voxcpm_narrate.console import log_error
+            log_error(f"Content verification failed: {exc}")
+            report = dict(version=GATE_VERSION, passed=False, unavailable=True,
+                          reasons=["音声検査を実行できませんでした。ASRの設定を確認してください"],
+                          windows=[])
+        report = {**report, "sha256": digest}
+        self.manager.mutate(jid, lambda j: version(segment(j, sid), vid).update(content_check=report))
+        return report
+
+    def _checked_generate(self, jid, sid, **kwargs):
+        for attempt in range(4):  # Initial generation plus at most three retries.
+            self.manager.checkpoint(jid)
+            v = self._generate(jid, sid, **kwargs)
+            report = self.verify_content(jid, sid, v["id"])
+            if report["passed"]:
+                return v
+            if report.get("unavailable"):
+                break
+            kwargs["seed"] = secrets.randbelow(2**31)
+            if attempt < 3:
+                self.manager.update(jid, message=f"{sid}: 原稿との不一致により再生成 ({attempt + 1}/3)")
+        message = "音声検査に合格しませんでした。候補の検査結果を確認してください"
+        self.manager.mutate(jid, lambda j: segment(j, sid).update(
+            status="ready" if segment(j, sid)["accepted"] else "pending"))
+        self.manager.update(jid, message=message)
+        raise ValueError(message)
+
+    def _require_content(self, jid, sid, vid):
+        report = self.verify_content(jid, sid, vid)
+        if not report["passed"]:
+            raise ValueError("音声検査が未合格のため採用・書き出しできません: "
+                             + " / ".join(report["reasons"]))
+        return report
+
     def _build_export(self, job):
         if not all(s["accepted"] for s in job["segments"]):
             return None
+        for seg in job["segments"]:
+            version(seg)["content_check"] = self._require_content(
+                job["id"], seg["id"], seg["accepted"])
         signature = [(s["id"], s["accepted"]) for s in job["segments"]]
         digest = hashlib.sha256(json.dumps(signature).encode()).hexdigest()[:20]
         dest = self.manager.job_dir(job["id"]) / "exports" / digest
@@ -336,6 +397,7 @@ class ProductionService:
         return result
 
     def adopt(self, jid, sid, vid):
+        self._require_content(jid, sid, vid)
         job = self.manager.get(jid)
         seg = segment(job, sid)
         v = version(seg, vid)
@@ -367,7 +429,7 @@ class ProductionService:
             self.manager.checkpoint(jid)
             seg = segment(self.manager.get(jid), sid)
             self.manager.mutate(jid, lambda j: segment(j, sid).update(status="running", error=None))
-            v = self._generate(jid, sid)
+            v = self._checked_generate(jid, sid)
             # Existing audio is never replaced just by pressing Generate.
             if not seg["accepted"]:
                 self.adopt(jid, sid, v["id"])
@@ -382,7 +444,7 @@ class ProductionService:
         self.manager.mutate(
             jid, lambda job: segment(job, sid).update(status="regenerating", error=None)
         )
-        self._generate(jid, sid, seed=secrets.randbelow(2**31))
+        self._checked_generate(jid, sid, seed=secrets.randbelow(2**31))
         self.manager.update(jid, message="候補を保存しました。試聴して採用してください")
 
     def evaluate(self, jid, sid, vid, asr=None, judge=None):
@@ -392,16 +454,17 @@ class ProductionService:
         v = version(seg, vid)
         path = self.audio_path(jid, sid, vid)
         wav, sr = sf.read(path, dtype="float32")
-        result = evaluate_segment(
-            segment_id=sid,
-            text=v["spoken_text"],
-            wav=wav,
-            sample_rate=sr,
-            wav_path=path,
-            asr=asr,
-            judge=judge,
-            awkward_threshold=0.62,
-        )
+        with self._content_lock if asr is not None else nullcontext():
+            result = evaluate_segment(
+                segment_id=sid,
+                text=v["spoken_text"],
+                wav=wav,
+                sample_rate=sr,
+                wav_path=path,
+                asr=asr,
+                judge=judge,
+                awkward_threshold=0.62,
+            )
         self.manager.mutate(
             jid, lambda job: version(segment(job, sid), vid).update(evaluation=result.to_dict())
         )
@@ -410,7 +473,7 @@ class ProductionService:
     def improve(self, jid, ids, api_key=""):
         job = self.manager.get(jid)
         cfg = job["config"]
-        asr = AsrTranscriber(device="cpu") if cfg.get("improve_asr") else None
+        asr = self._content_asr if cfg.get("improve_asr") else None
         judge = (
             LlmJudge(model=cfg["llm_model"], api_key=api_key or default_llm_api_key())
             if cfg.get("improve_llm")
@@ -431,6 +494,8 @@ class ProductionService:
             for _, params in build_strategies(base, max_rounds=cfg["improve_rounds"]):
                 self.manager.checkpoint(jid)
                 v = self._generate(jid, sid, overrides=params.to_dict())
+                if not self.verify_content(jid, sid, v["id"])["passed"]:
+                    continue
                 score = self.evaluate(jid, sid, v["id"], asr, judge)
                 comparable = judge is None or (
                     score.llm_score is not None and baseline.llm_score is not None
@@ -473,6 +538,8 @@ class ProductionService:
         job = self.manager.get(jid)
         if not job["export"]:
             raise ValueError("全セグメントを生成・採用してから書き出してください")
+        for seg in job["segments"]:
+            self._require_content(jid, seg["id"], seg["accepted"])
         folder = self.manager.job_dir(jid) / "exports" / job["export"]["id"]
         source = folder / "full.wav"
         if not normalize:

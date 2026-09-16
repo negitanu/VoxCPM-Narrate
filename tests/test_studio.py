@@ -38,6 +38,8 @@ class StudioTests(unittest.TestCase):
         self.service._model = FakeModel()
         self.service._model_key = ("openbmb/VoxCPM2", "auto")
         self.patchers = [
+            patch("voxcpm_narrate.web.service.inspect_audio", return_value={
+                "version": "content-v1", "passed": True, "reasons": [], "windows": []}),
             patch.object(web, "manager", self.manager),
             patch.object(web, "service", self.service),
             patch.object(web, "DEFAULT_OUT", Path(self.tmp.name)),

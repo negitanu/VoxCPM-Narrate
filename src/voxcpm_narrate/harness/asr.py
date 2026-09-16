@@ -27,13 +27,27 @@ class AsrTranscriber:
 
         log(f"[bold]Loading ASR:[/bold] {self.model_id} (device={self.device})")
         # SenseVoiceSmall works well for multilingual short clips
+        model_source = self.model_id
+        if model_source == "iic/SenseVoiceSmall":
+            cached = Path.home() / ".cache/modelscope/models/iic--SenseVoiceSmall/snapshots/master"
+            if (cached / "config.yaml").is_file() and (cached / "model.pt").is_file():
+                model_source = str(cached)
         self._model = AutoModel(
-            model=self.model_id,
+            model=model_source,
             vad_model=None,
             punc_model=None,
             device=self.device,
             disable_update=True,
         )
+
+    def recognize(self, audio) -> str:
+        """Preserve auto-detected language tags for the content gate; input is 16 kHz."""
+        self._ensure()
+        result = self._model.generate(input=audio, language="auto", use_itn=True, fs=16000)
+        if not result:
+            return ""
+        item = result[0]
+        return str(item.get("text") or item.get("preds") or "") if isinstance(item, dict) else str(item)
 
     def transcribe(self, wav_path: Path) -> str:
         self._ensure()
