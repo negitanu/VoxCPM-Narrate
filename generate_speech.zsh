@@ -18,15 +18,8 @@ ensure_uv() {
   if command -v uv >/dev/null 2>&1; then
     return 0
   fi
-  echo "==> uv not found. Installing via astral.sh ..." >&2
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-  if [[ -x "$HOME/.local/bin/uv" ]]; then
-    export PATH="$HOME/.local/bin:$PATH"
-  fi
-  if ! command -v uv >/dev/null 2>&1; then
-    echo "Failed to install uv. Install manually: https://docs.astral.sh/uv/" >&2
-    exit 1
-  fi
+  echo "uv is required. Install it from https://docs.astral.sh/uv/ and retry." >&2
+  exit 1
 }
 
 resolve_default_input() {

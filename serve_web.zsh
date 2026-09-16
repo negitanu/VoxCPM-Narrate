@@ -12,9 +12,8 @@ SCRIPT_DIR="${0:A:h}"
 cd "$SCRIPT_DIR"
 
 if ! command -v uv >/dev/null 2>&1; then
-  echo "uv not found. Installing…" >&2
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-  export PATH="$HOME/.local/bin:$PATH"
+  echo "uv is required. Install it from https://docs.astral.sh/uv/ and retry." >&2
+  exit 1
 fi
 
 export VOXCPM_WEB_HOST="${VOXCPM_WEB_HOST:-127.0.0.1}"

@@ -16,6 +16,7 @@ dependencies = [
   "fastapi>=0.115.0",
   "uvicorn[standard]>=0.30.0",
   "python-multipart>=0.0.9",
+  "python-dotenv>=1.0.0",
   "rich>=13.0.0",
 ]
 
@@ -40,6 +41,7 @@ include = [
   "src/voxcpm_narrate",
   "README.md",
   "LICENSE",
+  ".env.example",
   "pyproject.toml",
   "examples",
   "benchmarks",
