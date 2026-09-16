@@ -5,3 +5,6 @@
 @media(max-width:650px){.shell{display:block}.sidebar{min-height:0;padding:14px;border-right:0;border-bottom:1px solid var(--line)}.sidebar h2,.sidebar .import{display:none}.sidebar nav{flex-direction:row;overflow:auto;margin-top:8px}.library-item{min-width:170px;max-width:220px}.sidebar>button{width:auto}main{padding:24px 16px}.split{grid-template-columns:1fr;gap:0}.settings-grid{grid-template-columns:1fr 1fr}.topbar{padding:0 16px;height:58px}h1{font-size:24px}.progress-caption{display:block}.player{padding:10px 12px;gap:10px;height:88px}.player>div{min-width:75px;max-width:22%}.player audio{width:100px}.player button{padding:8px}.editor{padding:16px}}
 
 .version-details{flex-basis:100%;font-size:11px;line-height:1.65;overflow-wrap:anywhere}
+#pronunciation-candidates{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:14px;margin-top:18px;max-height:650px;overflow:auto;padding:3px}
+.reading-card{border:1px solid var(--line);border-radius:7px;padding:16px;background:var(--surface);overflow-wrap:anywhere}
+.reading-card label{font-size:12px;margin:12px 0}.reading-card p{margin:8px 0}.reading-card input:not([type=checkbox]){width:100%}.reading-card button{font-size:12px;padding:8px 10px}

@@ -66,6 +66,11 @@ class JobManager:
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, body TEXT NOT NULL)"
         )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS pronunciation_lexicon "
+            "(id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, body TEXT NOT NULL)"
+        )
+        self._db.execute("INSERT OR IGNORE INTO pronunciation_lexicon VALUES (1, 0, '{}')")
         self._db.commit()
         # Never silently restart costly operations after a process restart.
         for job in self.list():
@@ -129,6 +134,42 @@ class JobManager:
 
     def update(self, job_id: str, **kwargs) -> dict:
         return self.mutate(job_id, lambda job: job.update(kwargs))
+
+    def lexicon(self) -> dict:
+        with self._lock:
+            revision, body = self._db.execute(
+                "SELECT revision, body FROM pronunciation_lexicon WHERE id=1"
+            ).fetchone()
+            return {"revision": revision, "entries": json.loads(body)}
+
+    def learn_reading(self, job_id: str, term: str, reading: str, *, shared: bool,
+                     expected_revision: int) -> dict:
+        """Commit the job dictionary and shared vocabulary in one transaction."""
+        from voxcpm_narrate.pronunciation import validate_reading
+
+        validate_reading(term, reading)
+        with self._lock:
+            job = self.get(job_id)
+            if job["status"] in ACTIVE:
+                raise Conflict("生成処理が完了してから読みを登録してください")
+            lexicon = self.lexicon()
+            if shared and expected_revision != lexicon["revision"]:
+                raise Conflict("共通辞書が更新されています。候補を再取得して登録してください")
+            job["dictionary"][term] = reading
+            if len(job["dictionary"]) > 200:
+                raise ValueError("この制作の読み辞書は200件までです")
+            if shared:
+                lexicon["entries"][term] = reading
+                if len(lexicon["entries"]) > 200:
+                    raise ValueError("共通読み辞書は200件までです")
+            job["updated_at"] = now()
+            with self._db:
+                self._db.execute("UPDATE jobs SET body=? WHERE id=?",
+                                 (json.dumps(job, ensure_ascii=False), job_id))
+                if shared:
+                    self._db.execute("UPDATE pronunciation_lexicon SET revision=?, body=? WHERE id=1",
+                                     (lexicon["revision"] + 1, json.dumps(lexicon["entries"], ensure_ascii=False)))
+            return job
 
     def job_dir(self, job_id: str) -> Path:
         if not job_id.isalnum():

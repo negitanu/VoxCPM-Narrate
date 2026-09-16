@@ -5,6 +5,8 @@
   const labels = {draft:"下書き",queued:"待機中",running:"処理中",improving:"評価中",done:"保存済み",interrupted:"中断",error:"エラー"};
   let job = null, selectedId = null, renderedId = null, polling = false, sequence = [], librarySignature = "";
   let settings = {}, previewUrl = null, requestBusy = false;
+  let lexiconRevision = 0;
+  const dictionaryText = entries => Object.entries(entries).map(([k,v]) => `${k}=${v}`).join("\n");
   const checked = new Set();
   const draftKey = (jid, sid) => `voxcpm.edit.${jid}.${sid}`;
   function readLocal(key) { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } }
@@ -54,7 +56,8 @@
     job = data; history.replaceState(null,"",`?job=${id}`);
     $("setup").classList.add("hidden"); $("studio").classList.remove("hidden");
     $("dictionary").value = Object.entries(data.dictionary).map(([k,v]) => `${k}=${v}`).join("\n");
-    render(data); await refreshLibrary();
+    $("pronunciation-candidates").replaceChildren();
+    render(data); await refreshLibrary(); await loadPronunciations();
   }
   function editValue() {
     return {text:$("edit-text").value,reading:$("edit-reading").value,control:$("edit-control").value,pause_before_sec:+$("edit-pause").value};
@@ -139,7 +142,11 @@
     const seconds = times.length ? times.reduce((a,b)=>a+b,0)/times.length * (job.total-job.current) : null;
     $("timing").textContent = busy() && job.operation === "generate" && seconds > 0 ? `残り目安 ${Math.ceil(seconds/60)}分（生成実測から推定）` : "";
     $("cancel").classList.toggle("hidden",!busy()); $("cancel").disabled = job.cancel_requested;
-    for(const id of ["generate-all","generate-selected","regenerate","save-edit","judge","save-dictionary"]) $(id).disabled = !!busy();
+    for(const id of ["generate-all","generate-selected","regenerate","save-edit","judge","save-dictionary","find-pronunciations","import-pronunciations"]) $(id).disabled = !!busy();
+    for(const button of $("pronunciation-candidates").querySelectorAll("button")) button.disabled = !!busy();
+    const readingPreview = job.pronunciation_preview;
+    $("play-pronunciation").classList.toggle("hidden", !readingPreview);
+    $("pronunciation-preview-note").textContent = readingPreview ? `試聴時の読み：${readingPreview.term} → ${readingPreview.reading}（${readingPreview.segment_id}）` : "";
     $("play-all").disabled = job.current === 0;
     renderSegments();
     const seg = current();
@@ -218,14 +225,72 @@
   $("use-suggestion").onclick = () => { const feedback=current()?.feedback;if(!feedback)return;$("edit-text").value=feedback.revised_text;$("edit-control").value=feedback.voice_design_prompt;trackEdit();notice("提案を編集欄に取り込みました。元の本文と比べ、意味や固有名詞を確認してください。"); };
   $("save-dictionary").onclick = () => action(async()=>{
     const entries={};for(const line of $("dictionary").value.split("\n").filter(l=>l.trim())) {const index=line.indexOf("=");if(index<1)throw new Error("読み辞書は「表記=読み」の形式で入力してください");entries[line.slice(0,index).trim()]=line.slice(index+1).trim();}
-    render(await api(`/api/jobs/${job.id}/dictionary`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({entries})}));notice("読み辞書を保存しました。次の生成から適用されます。");
+    const data=await api(`/api/jobs/${job.id}/dictionary`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({entries})});
+    $("dictionary").value=dictionaryText(data.dictionary);render(data);await loadPronunciations();notice("読み辞書を保存しました。次の生成から適用されます。");
   });
-  $("find-pronunciations").onclick = () => action(async()=>{
-    const data = await api(`/api/jobs/${job.id}/pronunciation-candidates`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})});
-    const pending = data.candidates.filter(c=>c.status==="review");
-    $("pronunciation-candidates").textContent = pending.length ? `確認候補: ${pending.map(c=>`${c.term}（${c.script}）`).join("、")}` : "確認が必要な候補はありません。";
-    if(pending.length){const existing=$("dictionary").value.trim();const lines=pending.map(c=>`${c.term}=`);$("dictionary").value=[existing,...lines].filter(Boolean).join("\n");notice("候補を辞書欄へ追加しました。読みを入力して保存してください。");}
+  function requireSavedDictionary() {
+    if ($("dictionary").value !== dictionaryText(job.dictionary)) throw new Error("直接編集した読み辞書を先に保存してください。");
+  }
+  async function loadPronunciations() {
+    const jid=job.id, data=await post(`/api/jobs/${jid}/pronunciation-candidates`,{include_registered:$("show-registered-readings").checked});
+    if(job?.id !== jid)return;
+    lexiconRevision=data.lexicon.revision;
+    $("lexicon-count").textContent=`共通辞書 ${Object.keys(data.lexicon.entries).length}語 · この制作 ${Object.keys(job.dictionary).length}語`;
+    const cards=data.candidates.map(candidate=>{
+      const card=document.createElement("div");card.className="reading-card";
+      const title=document.createElement("strong");title.textContent=`${candidate.term} · ${candidate.occurrences}箇所${candidate.status === "known" ? " · 登録済み" : ""}`;
+      const context=document.createElement("p");context.className="muted small";context.textContent=candidate.context;
+      const key=`voxcpm.reading.${jid}.${candidate.term}`, saved=readLocal(key);
+      const label=document.createElement("label");label.textContent=`${candidate.term} の読み（かな）`;
+      const input=document.createElement("input");input.maxLength=200;input.value=saved?.reading ?? candidate.reading;input.placeholder="ひらがな・カタカナで入力";label.append(input);
+      const shareLabel=document.createElement("label");shareLabel.className="check";
+      const share=document.createElement("input");share.type="checkbox";share.checked=saved?.shared ?? false;
+      shareLabel.append(share,document.createTextNode("次の制作でも使う（共通辞書へ登録）"));
+      const saveDraft=()=>store(key,{reading:input.value,shared:share.checked});
+      input.oninput=saveDraft;share.onchange=saveDraft;
+      const buttons=document.createElement("div");buttons.className="actions";
+      const preview=document.createElement("button");preview.textContent="この読みを文中で試聴生成";
+      preview.onclick=()=>action(async()=>{
+        if(job?.id!==jid)return;requireSavedDictionary();await saveEdit();
+        if(job.segments.some(s=>readLocal(draftKey(jid,s.id))))throw new Error("本文の編集を保存してから試聴してください。");
+        render(await post(`/api/jobs/${jid}/pronunciation-preview`,{
+          request_id:crypto.randomUUID(),term:candidate.term,reading:input.value.trim(),
+          segment_id:candidate.segment_id,expected_revision:candidate.segment_revision
+        }));notice("試聴音声を生成しています。完了後に「最新の読み試聴を再生」で確認できます。");
+      });
+      const save=document.createElement("button");save.textContent="読みを登録";
+      save.onclick=()=>action(async()=>{
+        if(job?.id!==jid)return;requireSavedDictionary();
+        const data=await post(`/api/jobs/${jid}/pronunciation-learn`,{term:candidate.term,
+          reading:input.value.trim(),shared:share.checked,expected_revision:lexiconRevision});
+        localStorage.removeItem(key);
+        if(job?.id!==jid)return;
+        $("dictionary").value=dictionaryText(data.dictionary);render(data);await loadPronunciations();
+        notice("読みを登録しました。次の生成から適用されます。");
+      });
+      buttons.append(preview,save);card.append(title,context,label,shareLabel,buttons);return card;
+    });
+    if(!cards.length){const message=document.createElement("p");message.textContent="未登録の確認候補はありません。必要な読みは辞書の直接編集でも登録できます。";cards.push(message);}
+    $("pronunciation-candidates").replaceChildren(...cards);
+    for(const button of $("pronunciation-candidates").querySelectorAll("button"))button.disabled=!!busy();
+  }
+  $("find-pronunciations").onclick=()=>action(async()=>{
+    await saveEdit();
+    if(job.segments.some(s=>readLocal(draftKey(job.id,s.id))))throw new Error("他の箇所の本文編集も保存してから候補を更新してください。");
+    await loadPronunciations();notice("保存済みの最新本文から候補を更新しました。");
   });
+  $("show-registered-readings").onchange=()=>action(loadPronunciations);
+  $("import-pronunciations").onclick=()=>action(async()=>{
+    requireSavedDictionary();const jid=job.id,data=await post(`/api/jobs/${jid}/pronunciation-import`);
+    if(job?.id!==jid)return;$("dictionary").value=dictionaryText(data.dictionary);render(data);
+    await loadPronunciations();notice("共通辞書を取り込みました。この制作で登録した読みは優先されます。");
+  });
+  $("play-pronunciation").onclick=()=>{
+    const preview=job?.pronunciation_preview;if(!preview)return;
+    sequence=[];$("audio").src=`/api/jobs/${job.id}/pronunciation-preview/${preview.id}`;
+    $("player-label").textContent=`読み確認：${preview.term} → ${preview.reading}`;
+    $("player-detail").textContent=preview.text;$("audio").play().catch(err=>notice(err.message,true));
+  };
   $("fork-script").onclick = () => {const text=job.script, title=job.title,mode=job.mode;$("new-job").click();$("script").value=text;$("title").value=title+"（改訂）";$("mode").value=mode;saveSetup();notice("台本全体の改訂は新しい制作として保存します。元の制作と音声は保持されます。参照音声は再選択してください。");$("reference").value="";$("reference-player").classList.add("hidden");};
   function playOne(sid,vid,continuous=false) {
     if(!continuous) sequence=[];

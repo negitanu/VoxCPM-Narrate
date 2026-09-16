@@ -68,6 +68,84 @@ class StudioTests(unittest.TestCase):
     def test_error_logging_does_not_raise(self):
         log_error("expected test error")
 
+    def test_reading_candidates_use_edited_drafts_and_not_markup(self):
+        job = self.create("東京支社です。")
+        sid = job["segments"][0]["id"]
+        self.service.edit(job["id"], sid, 0,
+                          {**job["segments"][0]["draft"], "text": "VoxCPMです。"})
+        result = self.client.post(f"/api/jobs/{job['id']}/pronunciation-candidates", json={}).json()
+        self.assertEqual([c["term"] for c in result["candidates"]], ["VoxCPM"])
+        self.assertEqual(result["candidates"][0]["segment_revision"], 1)
+        ssml = self.client.post("/api/jobs", data={"mode": "ssml", "script":
+            '<speak><p><sub alias="エーアイ">AI</sub>です。</p></speak>'}).json()
+        terms = [c["term"] for c in self.service.pronunciation_candidates(ssml["id"])]
+        self.assertNotIn("speak", terms)
+        self.assertNotIn("alias", terms)
+        self.assertNotIn("AI", terms)
+
+    def test_shared_reading_is_durable_and_is_copied_to_new_jobs(self):
+        job = self.create("VoxCPMです。")
+        response = self.client.post(f"/api/jobs/{job['id']}/pronunciation-learn", json={
+            "term": "VoxCPM", "reading": "ボックスシーピーエム", "shared": True,
+            "expected_revision": 0})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["dictionary"]["VoxCPM"], "ボックスシーピーエム")
+        restored = JobManager(Path(self.tmp.name))
+        try:
+            self.assertEqual(restored.lexicon()["entries"]["VoxCPM"], "ボックスシーピーエム")
+        finally:
+            restored.close()
+        new_job = self.create("VoxCPMです。")
+        self.assertEqual(new_job["dictionary"]["VoxCPM"], "ボックスシーピーエム")
+        registered = self.client.post(f"/api/jobs/{new_job['id']}/pronunciation-candidates",
+                                       json={"include_registered": True}).json()["candidates"]
+        self.assertEqual(registered[0]["status"], "known")
+        self.assertEqual(registered[0]["reading"], "ボックスシーピーエム")
+        stale = self.client.post(f"/api/jobs/{job['id']}/pronunciation-learn", json={
+            "term": "VoxCPM", "reading": "ちがうよみ", "shared": True, "expected_revision": 0})
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(self.manager.get(job["id"])["dictionary"]["VoxCPM"], "ボックスシーピーエム")
+
+    def test_dictionary_import_preserves_local_readings(self):
+        job = self.create("東京です。")
+        self.manager.update(job["id"], dictionary={"東京": "とうきょう"})
+        other = self.create("東京です。")
+        self.manager.learn_reading(other["id"], "東京", "トーキョー", shared=True, expected_revision=0)
+        response = self.client.post(f"/api/jobs/{job['id']}/pronunciation-import")
+        self.assertEqual(response.json()["dictionary"]["東京"], "とうきょう")
+
+    def test_reading_preview_uses_queue_without_adopting_or_saving_reading(self):
+        job = self.run_all(self.create("VoxCPMを使います。")["id"])
+        sid = job["segments"][0]["id"]
+        body = {"term": "VoxCPM", "reading": "ボックスシーピーエム", "segment_id": sid,
+                "expected_revision": job["segments"][0]["revision"], "request_id": "preview-reading"}
+        with patch.object(self.service._model, "generate", wraps=self.service._model.generate) as generate:
+            response = self.client.post(f"/api/jobs/{job['id']}/pronunciation-preview", json=body)
+            self.assertEqual(response.status_code, 200)
+            self.manager._queue.join()
+            self.assertIn("ボックスシーピーエム", generate.call_args.kwargs["text"])
+        updated = self.manager.get(job["id"])
+        self.assertEqual(updated["dictionary"], job["dictionary"])
+        self.assertEqual(updated["segments"], job["segments"])
+        self.assertEqual(updated["export"], job["export"])
+        preview_id = updated["pronunciation_preview"]["id"]
+        audio = self.client.get(f"/api/jobs/{job['id']}/pronunciation-preview/{preview_id}")
+        self.assertEqual(audio.status_code, 200)
+        self.assertEqual(self.client.get(f"/api/jobs/{job['id']}/pronunciation-preview/wrong").status_code, 404)
+        body["request_id"] = "stale-preview"
+        body["expected_revision"] = 99
+        self.assertEqual(self.client.post(f"/api/jobs/{job['id']}/pronunciation-preview", json=body).status_code, 409)
+
+    def test_invalid_reading_and_busy_jobs_do_not_change_dictionaries(self):
+        job = self.create("VoxCPMです。")
+        url = f"/api/jobs/{job['id']}/pronunciation-learn"
+        body = {"term": "VoxCPM", "reading": "English123", "shared": True}
+        self.assertEqual(self.client.post(url, json=body).status_code, 400)
+        body["reading"] = "ボックスシーピーエム"
+        self.manager.update(job["id"], status="running")
+        self.assertEqual(self.client.post(url, json=body).status_code, 409)
+        self.assertEqual(self.manager.lexicon()["entries"], {})
+
     def test_public_snapshot_removes_server_paths_and_internal_errors(self):
         private = "/private/example/model"
         snapshot = safe_job_snapshot(

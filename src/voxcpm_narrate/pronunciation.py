@@ -16,6 +16,31 @@ DEFAULT_KNOWN = {
 }
 
 
+def dictionary_pattern(dictionary: dict[str, str]):
+    patterns = []
+    for term in sorted(dictionary, key=len, reverse=True):
+        if not term:
+            continue
+        prefix = r"(?<![A-Za-z0-9_])" if term[0].isascii() and term[0].isalnum() else ""
+        suffix = r"(?![A-Za-z0-9_])" if term[-1].isascii() and term[-1].isalnum() else ""
+        patterns.append(prefix + re.escape(term) + suffix)
+    return re.compile("|".join(patterns)) if patterns else None
+
+
+def apply_dictionary(text: str, dictionary: dict[str, str]) -> str:
+    pattern = dictionary_pattern(dictionary)
+    return pattern.sub(lambda m: dictionary[m[0]], text) if pattern else text
+
+
+def validate_reading(term: str, reading: str) -> None:
+    if not term.strip() or term != term.strip() or len(term) > 100:
+        raise ValueError("用語は前後の空白を除き、1〜100文字で入力してください")
+    if not reading.strip() or len(reading) > 200 or not re.fullmatch(
+        r"[ぁ-ゖァ-ヺー・、。！？!? 　]+", reading
+    ):
+        raise ValueError("読みはひらがな・カタカナで200文字以内に入力してください")
+
+
 def _candidate_terms(text: str) -> list[str]:
     found: list[str] = []
     for pattern in (KANJI, KATAKANA, LATIN):
@@ -38,15 +63,18 @@ def find_unknown_words(text: str, dictionary: dict[str, str] | None = None,
     """
     dictionary = dictionary or {}
     known = DEFAULT_KNOWN | (known or set()) | set(dictionary)
+    # Mask only actual registered occurrences, not every substring of an entry.
+    pattern = dictionary_pattern(dictionary)
+    uncovered = pattern.sub(lambda m: " " * len(m[0]), text) if pattern else text
     results = []
-    for term in _candidate_terms(text):
+    for term in _candidate_terms(uncovered):
         if term in known or term.isdigit() or len(term) < 2:
             continue
-        if any(term in other and term != other for other in dictionary):
-            continue
         script = "漢字" if KANJI.fullmatch(term) else "カタカナ" if KATAKANA.fullmatch(term) else "英数字"
-        results.append({"term": term, "reading": dictionary.get(term, ""), "script": script,
-                        "occurrences": text.count(term), "status": "known" if term in dictionary else "review"})
+        index = uncovered.find(term)
+        results.append({"term": term, "reading": "", "script": script,
+                        "context": text[max(0, index - 30):index + len(term) + 30],
+                        "occurrences": uncovered.count(term), "status": "review"})
     return results
 
 

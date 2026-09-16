@@ -104,6 +104,21 @@ class DictionaryBody(Validated):
 
 class PronunciationBody(Validated):
     script: str | None = Field(default=None, max_length=200000)
+    include_registered: bool = False
+
+
+class LearnReading(Validated):
+    term: str = Field(min_length=1, max_length=100)
+    reading: str = Field(min_length=1, max_length=200)
+    shared: bool = False
+    expected_revision: int = Field(default=0, ge=0)
+
+
+class ReadingPreview(Operation):
+    term: str = Field(min_length=1, max_length=100)
+    reading: str = Field(min_length=1, max_length=200)
+    segment_id: str = Field(min_length=1, max_length=100)
+    expected_revision: int = Field(ge=0)
 
 
 class ImportBody(Validated):
@@ -280,7 +295,46 @@ def dictionary(jid: str, body: DictionaryBody):
 
 @app.post("/api/jobs/{jid}/pronunciation-candidates")
 def pronunciation_candidates(jid: str, body: PronunciationBody):
-    return {"candidates": service.pronunciation_candidates(jid, body.script)}
+    return {"candidates": service.pronunciation_candidates(jid, body.script, body.include_registered),
+            "lexicon": manager.lexicon()}
+
+
+@app.get("/api/pronunciation-dictionary")
+def pronunciation_dictionary():
+    return manager.lexicon()
+
+
+@app.post("/api/jobs/{jid}/pronunciation-learn")
+def pronunciation_learn(jid: str, body: LearnReading):
+    return public(manager.learn_reading(jid, body.term, body.reading, shared=body.shared,
+                                       expected_revision=body.expected_revision))
+
+
+@app.post("/api/jobs/{jid}/pronunciation-import")
+def pronunciation_import(jid: str):
+    return public(service.import_lexicon(jid))
+
+
+@app.post("/api/jobs/{jid}/pronunciation-preview")
+def pronunciation_preview(jid: str, body: ReadingPreview):
+    return public(manager.submit(jid, "pronunciation-preview",
+        lambda key: service.preview_pronunciation(key, body.segment_id, body.expected_revision,
+                                                 body.term, body.reading),
+        request_id=body.request_id,
+        validate=lambda job: service.validate_pronunciation_preview(job, body.segment_id,
+                          body.expected_revision, body.term, body.reading)))
+
+
+@app.get("/api/jobs/{jid}/pronunciation-preview/{preview_id}")
+def pronunciation_preview_audio(jid: str, preview_id: str):
+    # Serve only the published preview belonging to this production.
+    preview = manager.get(jid).get("pronunciation_preview")
+    if not preview or preview["id"] != preview_id:
+        raise KeyError("試聴音声が見つかりません。最新の試聴を生成してください")
+    path = manager.job_dir(jid) / "pronunciation" / f"{preview['id']}.wav"
+    if not path.is_file():
+        raise KeyError("試聴音声が見つかりません")
+    return FileResponse(path, media_type="audio/wav")
 
 
 @app.post("/api/jobs/{jid}/generate")

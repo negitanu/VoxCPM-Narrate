@@ -20,7 +20,9 @@ from voxcpm_narrate.harness.asr import AsrTranscriber
 from voxcpm_narrate.harness.judge import LlmJudge, default_llm_api_key
 from voxcpm_narrate.harness.loop import evaluate_segment
 from voxcpm_narrate.harness.strategies import GenParams, build_strategies
-from voxcpm_narrate.pronunciation import find_unknown_words
+from voxcpm_narrate.pronunciation import (
+    apply_dictionary, dictionary_pattern, find_unknown_words, validate_reading,
+)
 from voxcpm_narrate.synthesize import assemble_full_wav, generate_wav, load_model
 from voxcpm_narrate.web.jobs import (
     ACTIVE,
@@ -108,6 +110,9 @@ class ProductionService:
                 )
             )
         job = new_job(title, script, mode, config, segments)
+        learned = self.manager.lexicon()
+        job["dictionary"] = learned["entries"]
+        job["dictionary_origin_revision"] = learned["revision"]
         self.manager.job_dir(job["id"])
         return self.manager.save(job)
 
@@ -130,10 +135,75 @@ class ProductionService:
 
         return self.manager.mutate(jid, change)
 
-    def pronunciation_candidates(self, jid: str, script: str | None = None) -> list[dict]:
+    def pronunciation_candidates(self, jid: str, script: str | None = None,
+                                 include_registered: bool = False) -> list[dict]:
         job = self.manager.get(jid)
-        source = script if script is not None else job["script"]
-        return find_unknown_words(source, job.get("dictionary", {}))
+        if script is None:
+            sources = [(s["id"], s["revision"], s["draft"]["reading"] or s["draft"]["text"])
+                       for s in job["segments"]]
+        else:
+            sources = [(None, None, item["text"]) for item in parse_script(
+                script, job["mode"], job["config"]["max_chars"], job["config"]["control"])]
+        candidates = {}
+        learned = self.manager.lexicon()["entries"]
+        for sid, revision, text in sources:
+            dictionary = job.get("dictionary", {})
+            items = find_unknown_words(text, dictionary)
+            pattern = dictionary_pattern(dictionary)
+            if include_registered and pattern:
+                for match in pattern.finditer(text):
+                    items.append({"term": match[0], "reading": dictionary[match[0]],
+                                  "script": "登録済み", "status": "known", "occurrences": 1,
+                                  "context": text[max(0, match.start() - 30):match.end() + 30]})
+            for item in items:
+                term = item["term"]
+                if term in candidates:
+                    candidates[term]["occurrences"] += item["occurrences"]
+                    continue
+                candidates[term] = {**item, "segment_id": sid, "segment_revision": revision,
+                                    "reading": item["reading"] or learned.get(term, ""),
+                                    "reading_source": "この制作" if term in dictionary else
+                                        "共通辞書" if term in learned else None}
+        return list(candidates.values())
+
+    def import_lexicon(self, jid):
+        def change(job):
+            check_idle(job)
+            combined = {**self.manager.lexicon()["entries"], **job["dictionary"]}
+            if len(combined) > 200:
+                raise ValueError("辞書を取り込むと200件を超えます。不要な用語を整理してください")
+            job["dictionary"] = combined
+        return self.manager.mutate(jid, change)
+
+    def validate_pronunciation_preview(self, job, sid, revision, term, reading):
+        validate_reading(term, reading)
+        seg = segment(job, sid)
+        check_revision(seg, revision)
+        source = seg["draft"]["reading"] or seg["draft"]["text"]
+        if not dictionary_pattern({term: reading}).search(source):
+            raise Conflict("対象の語が本文から変更されています。候補を再取得してください")
+
+    def preview_pronunciation(self, jid, sid, revision, term, reading):
+        job = self.manager.get(jid)
+        self.validate_pronunciation_preview(job, sid, revision, term, reading)
+        seg = segment(job, sid)
+        cfg = job["config"]
+        spoken = self._spoken(seg["draft"], {**job["dictionary"], term: reading})
+        self.manager.update(jid, message=f"「{term}」の読みを文中で試聴生成しています")
+        model = self.model(cfg)
+        self.manager.checkpoint(jid)
+        metadata = {}
+        wav = generate_wav(model, text=spoken, control=seg["draft"]["control"],
+                           reference_audio=self._reference_audio(jid, cfg),
+                           cfg_value=cfg["cfg_value"], inference_timesteps=cfg["timesteps"],
+                           normalize=True, seed=cfg["seed"], input_metadata=metadata)
+        preview_id = uuid.uuid4().hex
+        path = self.manager.job_dir(jid) / "pronunciation" / f"{preview_id}.wav"
+        write_wav(path, wav, int(model.tts_model.sample_rate))
+        preview = {"id": preview_id, "term": term, "reading": reading, "segment_id": sid,
+                   "segment_revision": revision, "text": spoken, **metadata}
+        write_json(path.with_suffix(".json"), preview)
+        self.manager.update(jid, pronunciation_preview=preview)
 
     def model(self, config):
         key = (config["model_id"], config["device"])
@@ -154,15 +224,7 @@ class ProductionService:
 
     def _spoken(self, draft, dictionary):
         text = draft["reading"] or draft["text"]
-        # One pass: replacements cannot recursively expand other dictionary entries.
-        if dictionary:
-            import re
-
-            pattern = "|".join(
-                re.escape(term) for term in sorted(dictionary, key=len, reverse=True)
-            )
-            text = re.sub(pattern, lambda match: dictionary[match.group()], text)
-        return text
+        return apply_dictionary(text, dictionary)
 
     def _generate(self, jid, sid, *, seed=None, overrides=None):
         job = self.manager.get(jid)
