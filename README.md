@@ -84,11 +84,11 @@ uv sync
 | **基本（推奨）** | 参照声音（`run_dir/reference.wav` または `--reference`） | 再生成時も声色を固定 |
 | **ASR あり** | 追加インストール不要（`funasr` / SenseVoice は voxcpm 経由で利用） | 読み誤り検知（CER） |
 | **ASR あり** | 初回の SenseVoice モデルダウンロード（ネット接続） | `--asr` 初回のみ |
-| **LLM 判定あり** | ローカルの OpenAI 互換 API（例: [Ollama](https://ollama.com/)） | イントネーション違和感の補助判定 |
-| **LLM 判定あり** | 起動中のモデル（例: `llama3.2`） | `--llm-judge` |
+| **LLM 判定あり** | [OpenRouter](https://openrouter.ai/) API キー | イントネーション違和感の補助判定 |
+| **LLM 判定あり** | モデル ID（例: `openai/gpt-4o-mini`） | `--llm-judge` / Web UI |
 
 > 最低限は **基本だけ** で回せます（話速・無音・エネルギーなどの音響指標）。  
-> `--asr` と `--llm-judge` は精度を上げるオプションです。
+> `--asr` と `--llm-judge`（OpenRouter）は精度を上げるオプションです。
 
 ---
 
@@ -144,13 +144,34 @@ uv run voxcpm-narrate-web
 
 ### 画面の流れ
 
-1. **参照声音**をアップロード（プレビュー可）
-2. **SSML**をファイル選択、またはテキスト貼り付け
-3. デバイス・自己改善・ASR などの設定
-4. **音声を作成** → 進捗バーでセグメント進行を表示
-5. 完了後、ブラウザで試聴・WAV ダウンロード
+1. 制作名と台本（SSML / Markdown / プレーンテキスト）を入力し、必要なら参照声音を追加
+2. **分割を確認**で、セグメントと各セグメント前の間を確認
+3. 制作を保存し、未生成部分や選択した箇所を試聴生成
+4. セグメントごとに本文・読み・話し方を編集し、候補を試聴してから採用（採用前の音声は保持）
+5. 生成中にブラウザを閉じても制作は SQLite に保存。再起動後はライブラリから中断箇所を再開
+6. 全体 WAV、ピークを -1 dB に揃えた WAV、制作データを含む ZIP をダウンロード
 
-ジョブ成果物は `output/voxcpm2/web_jobs/<job_id>/` に保存されます。
+参照声音は任意です。指定した場合は制作ごとにコピー・変換して保存し、元ファイルを移動しても再生成できます。入力内容や候補を含む制作データは `VOXCPM_WEB_OUT` 以下に保存されます。
+
+自己改善で LLM 判定を使う場合は、設定パネルで API キーとモデルを選びます（入力キーはタブのメモリ内のみ、またはサーバーの `OPENROUTER_API_KEY` を使用）。以前 localStorage に保存したキーは設定パネルから消去できます。
+
+制作データとジョブ成果物は `output/voxcpm2/web_jobs/<job_id>/` に保存されます。制作一覧と状態は同じ場所の `productions.sqlite3` に保存されます。
+
+### Web API の主な操作
+
+Web UI は次の API を使用します。API キーは制作 JSON や SQLite には保存しません。
+
+| API | 用途 |
+|-----|------|
+| `POST /api/preview` | 台本を解析して分割を確認 |
+| `POST /api/jobs` | 制作を保存（参照声音は任意） |
+| `POST /api/jobs/{id}/generate` | 未生成または選択セグメントをキューに入れる |
+| `POST /api/jobs/{id}/cancel` | セグメント境界で中断 |
+| `PATCH /api/jobs/{id}/segments/{segment}` | 版番号を検証して編集を保存 |
+| `POST .../regenerate` / `.../adopt` | 候補を作り、試聴後に採用・元に戻す |
+| `GET /api/jobs/{id}/archive` | WAV・章別音声・台本・条件を ZIP で保存 |
+
+音声評価を OpenRouter に送る場合は、画面に示す送信内容を確認してください。「音声を聴いて改善提案」の結果は音声版に紐づけて保存し、提案の取り込み・再生成・採用を個別に操作できます。生成時の自己改善ループは、条件を満たした候補を自動採用します。
 
 > 長い台本（20分級）はローカル推論のため数十分〜かかる場合があります。タブを閉じてもサーバ側のジョブは継続します（`./serve_web.zsh` を止めない限り）。
 
@@ -289,7 +310,7 @@ uv run voxcpm-narrate synthesize \
 - [ ] 再生成用に VoxCPM2 が動く（`uv sync` 済み）
 - [ ] （推奨）`reference.wav` がある、または `--reference` を渡せる
 - [ ] （任意）`--asr` を使うならネットで SenseVoice を取得できる
-- [ ] （任意）`--llm-judge` を使うなら Ollama 等が `http://127.0.0.1:11434/v1` で応答する
+- [ ] （任意）`--llm-judge` を使うなら `OPENROUTER_API_KEY` が設定されている
 
 ```zsh
 # 前提の確認例
@@ -302,7 +323,7 @@ ls output/voxcpm2/latest/segments | head
 1. 各セグメントを採点  
    - **音響**: 話速（文字/秒）、前後無音、クリップ、エネルギー安定性  
    - **ASR（任意）**: SenseVoice で書き起こし → 台本との CER  
-   - **LLM（任意）**: 台本・ASR・メトリクスから違和感を JSON 判定  
+   - **LLM（任意）**: [OpenRouter](https://openrouter.ai/) 経由で台本・ASR・メトリクスから違和感を JSON 判定
 2. 総合スコアが閾値未満（既定 `0.62`）を **awkward** とみなす  
 3. 戦略を順に試す（最大 `--max-rounds` 回）  
    - seed 変更 / CFG 下げ / 話し方プロンプト / diffusion steps 増やす / normalize 切替 など  
@@ -319,8 +340,9 @@ ls output/voxcpm2/latest/segments | head
 # ASR で読み誤りも見る（推奨）
 ./improve_speech.zsh --asr
 
-# ASR + ローカル LLM
-./improve_speech.zsh --asr --llm-judge --llm-model llama3.2
+# ASR + OpenRouter LLM
+export OPENROUTER_API_KEY=sk-or-v1-...
+./improve_speech.zsh --asr --llm-judge --llm-model openai/gpt-4o-mini
 
 # 評価だけ（再生成しない）
 ./improve_speech.zsh --max-rounds 0
@@ -332,13 +354,7 @@ ls output/voxcpm2/latest/segments | head
 ./improve_speech.zsh --run-dir output/voxcpm2/run_20260915_140643 --asr
 ```
 
-Ollama を使う場合の例:
-
-```zsh
-ollama serve          # 別ターミナル
-ollama pull llama3.2
-./improve_speech.zsh --asr --llm-judge --llm-base-url http://127.0.0.1:11434/v1 --llm-model llama3.2
-```
+OpenRouter のキーは `.env`（Web UI が読込）または環境変数で渡せます。Web UI では設定パネルからモデル選択もできます。
 
 ### 改善ループの成果物
 
@@ -362,9 +378,10 @@ output/voxcpm2/latest/
 | `--threshold` | `0.62` | これ未満を awkward |
 | `--asr` | off | SenseVoice + CER |
 | `--asr-device` | `cpu` | ASR デバイス |
-| `--llm-judge` | off | ローカル LLM 判定 |
-| `--llm-base-url` | `http://127.0.0.1:11434/v1` | OpenAI 互換 endpoint |
-| `--llm-model` | `llama3.2` | 判定モデル名 |
+| `--llm-judge` | off | OpenRouter LLM 判定 |
+| `--llm-base-url` | `https://openrouter.ai/api/v1` | OpenAI 互換 endpoint |
+| `--llm-model` | `openai/gpt-4o-mini` | 判定モデル（`OPENROUTER_MODEL` 可） |
+| `--llm-api-key` | `OPENROUTER_API_KEY` | API キー |
 | `--segment-id` | — | 対象を限定（繰り返し可） |
 | `--all` | off | awkward 以外も改善対象にする |
 | `--limit` | — | 先頭 N セグメントのみ |
@@ -454,7 +471,7 @@ cp /path/to/voice.wav workspace/source.wav
 | 声がセグメントごとに揺れる | 同じ `--reference` と `--seed` を固定 |
 | 長文でノイズ | `--max-chars 80`、`--cfg 1.6` |
 | ASR 初回が遅い | SenseVoice のダウンロード中。完了後はキャッシュ利用 |
-| LLM 判定が効かない | `ollama serve` と `ollama pull <model>`、URL / モデル名を確認 |
+| LLM 判定が効かない | `OPENROUTER_API_KEY` / Web UI の API キーとモデル ID を確認。課金・モデル公開状態も確認 |
 | 改善で置換されない | 候補スコアが元より十分に上がっていない。`--max-rounds` を増やすか `--threshold` を調整 |
 
 ---

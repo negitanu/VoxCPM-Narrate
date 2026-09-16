@@ -94,6 +94,8 @@ def _rate_hint(rate: str | None) -> str | None:
     m = re.fullmatch(r"([+-]?[0-9]*\.?[0-9]+)%", rate)
     if m:
         pct = float(m.group(1))
+        if not m.group(1).startswith(("+", "-")):
+            pct -= 100.0
         if pct <= -20:
             return "かなりゆっくり"
         if pct < 0:

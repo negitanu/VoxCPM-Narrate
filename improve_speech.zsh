@@ -4,7 +4,7 @@
 # Examples:
 #   ./improve_speech.zsh
 #   ./improve_speech.zsh --asr --max-rounds 4
-#   ./improve_speech.zsh --llm-judge --llm-model llama3.2
+#   ./improve_speech.zsh --asr --llm-judge --llm-model openai/gpt-4o-mini
 #   ./improve_speech.zsh --segment-id 03_002 --segment-id 07_002
 #   ./improve_speech.zsh --run-dir output/voxcpm2/run_YYYYMMDD_HHMMSS
 
@@ -43,9 +43,9 @@ SEGMENT_IDS=()
 USE_ASR=0
 ASR_DEVICE="cpu"
 USE_LLM=0
-LLM_BASE_URL="http://127.0.0.1:11434/v1"
-LLM_MODEL="llama3.2"
-LLM_API_KEY="ollama"
+LLM_BASE_URL="${OPENROUTER_BASE_URL:-${VOXCPM_LLM_BASE_URL:-https://openrouter.ai/api/v1}}"
+LLM_MODEL="${OPENROUTER_MODEL:-${VOXCPM_LLM_MODEL:-openai/gpt-4o-mini}}"
+LLM_API_KEY="${OPENROUTER_API_KEY:-${VOXCPM_LLM_API_KEY:-}}"
 ONLY_AWKWARD=1
 NO_CONTROL=0
 NORMALIZE=1
@@ -68,9 +68,10 @@ Options:
   --segment-id ID         Target specific segment (repeatable)
   --asr                   Enable SenseVoice ASR + CER
   --asr-device NAME       ASR device (default: cpu)
-  --llm-judge             Enable local LLM judge (OpenAI-compatible)
-  --llm-base-url URL      default http://127.0.0.1:11434/v1
-  --llm-model NAME        default llama3.2
+  --llm-judge             Enable OpenRouter LLM judge
+  --llm-base-url URL      default https://openrouter.ai/api/v1
+  --llm-model NAME        default openai/gpt-4o-mini (or OPENROUTER_MODEL)
+  --llm-api-key KEY       default OPENROUTER_API_KEY
   --device NAME           auto|cpu|mps|cuda
   --control TEXT          Base style control for retries
   --no-control
@@ -144,6 +145,10 @@ if (( NO_CONTROL )); then ARGS+=(--no-control); else ARGS+=(--control "$CONTROL"
 if (( ! ONLY_AWKWARD )); then ARGS+=(--all); fi
 if (( USE_ASR )); then ARGS+=(--asr --asr-device "$ASR_DEVICE"); fi
 if (( USE_LLM )); then
+  if [[ -z "$LLM_API_KEY" ]]; then
+    echo "OPENROUTER_API_KEY (or --llm-api-key) is required when --llm-judge is set" >&2
+    exit 1
+  fi
   ARGS+=(--llm-judge --llm-base-url "$LLM_BASE_URL" --llm-model "$LLM_MODEL" --llm-api-key "$LLM_API_KEY")
 fi
 if [[ -n "$REFERENCE" ]]; then ARGS+=(--reference "$REFERENCE"); fi

@@ -7,7 +7,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from voxcpm_narrate.console import ensure_rich_tqdm, log, log_error
 from voxcpm_narrate.extract import detect_input_mode, load_jobs
+from voxcpm_narrate.harness.judge import default_llm_api_key, default_llm_base_url, default_llm_model
 from voxcpm_narrate.harness.loop import run_improve_loop
 from voxcpm_narrate.synthesize import prepare_reference_wav, synthesize
 
@@ -113,11 +115,23 @@ def build_parser() -> argparse.ArgumentParser:
     imp.add_argument(
         "--llm-judge",
         action="store_true",
-        help="Enable local OpenAI-compatible LLM judge (Ollama / LM Studio)",
+        help="Enable OpenRouter (OpenAI-compatible) LLM judge",
     )
-    imp.add_argument("--llm-base-url", default="http://127.0.0.1:11434/v1")
-    imp.add_argument("--llm-model", default="llama3.2")
-    imp.add_argument("--llm-api-key", default="ollama")
+    imp.add_argument(
+        "--llm-base-url",
+        default=default_llm_base_url(),
+        help="OpenAI-compatible base URL (default: OpenRouter)",
+    )
+    imp.add_argument(
+        "--llm-model",
+        default=default_llm_model(),
+        help="Model id (default: openai/gpt-4o-mini or OPENROUTER_MODEL)",
+    )
+    imp.add_argument(
+        "--llm-api-key",
+        default=default_llm_api_key(),
+        help="API key (default: OPENROUTER_API_KEY)",
+    )
     _add_common_synth_args(imp)
 
     return parser
@@ -134,7 +148,7 @@ def _prepare_reference(args: argparse.Namespace, output_dir: Path) -> str | None
 
 def cmd_synthesize(args: argparse.Namespace) -> int:
     if not args.input.is_file():
-        print(f"input not found: {args.input}", file=sys.stderr)
+        log_error(f"input not found: {args.input}")
         return 1
 
     control = None if args.no_control else args.control
@@ -149,7 +163,7 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
             base_control=control if mode == "ssml" else None,
         )
     except ValueError as exc:
-        print(str(exc), file=sys.stderr)
+        log_error(str(exc))
         return 1
 
     # Section filter: by 1-based section index among unique section names in order
@@ -161,7 +175,7 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
             if sec not in ordered_sections:
                 ordered_sections.append(sec)
         if section < 1 or section > len(ordered_sections):
-            print(f"--section out of range: 1..{len(ordered_sections)}", file=sys.stderr)
+            log_error(f"--section out of range: 1..{len(ordered_sections)}")
             return 1
         target = ordered_sections[section - 1]
         jobs = [j for j in jobs if str(j["section"]) == target]
@@ -170,7 +184,7 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
         jobs = jobs[: args.limit]
 
     if not jobs:
-        print("No synthesis jobs produced from input.", file=sys.stderr)
+        log_error("No synthesis jobs produced from input.")
         return 1
 
     if args.output_dir is None:
@@ -184,10 +198,10 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
         try:
             reference_audio = _prepare_reference(args, output_dir)
         except (RuntimeError, FileNotFoundError) as exc:
-            print(str(exc), file=sys.stderr)
+            log_error(str(exc))
             return 1
 
-    print(f"==> parse mode: {mode} ({len(jobs)} segments)")
+    log(f"[bold]==>[/bold] parse mode: {mode} ({len(jobs)} segments)")
     synthesize(
         jobs,
         output_dir=output_dir,
@@ -209,13 +223,13 @@ def cmd_synthesize(args: argparse.Namespace) -> int:
             latest.unlink()
         latest.symlink_to(output_dir.resolve())
 
-    print()
-    print("Done.")
-    print(f"  segments : {output_dir / 'segments'}/")
-    print(f"  manifest : {output_dir / 'manifest.json'}")
-    print(f"  full wav : {output_dir / 'full.wav'}")
+    log("")
+    log("[bold green]Done.[/bold green]")
+    log(f"  segments : {output_dir / 'segments'}/")
+    log(f"  manifest : {output_dir / 'manifest.json'}")
+    log(f"  full wav : {output_dir / 'full.wav'}")
     if args.output_dir is None and not args.dry_run:
-        print(f"  latest   : {args.out_root / 'latest'} -> {output_dir}")
+        log(f"  latest   : {args.out_root / 'latest'} -> {output_dir}")
     return 0
 
 
@@ -224,7 +238,7 @@ def cmd_improve(args: argparse.Namespace) -> int:
     if run_dir.is_symlink():
         run_dir = run_dir.resolve()
     if not run_dir.is_dir():
-        print(f"run dir not found: {args.run_dir}", file=sys.stderr)
+        log_error(f"run dir not found: {args.run_dir}")
         return 1
 
     control = None if args.no_control else args.control
@@ -233,7 +247,7 @@ def cmd_improve(args: argparse.Namespace) -> int:
         try:
             reference_audio = _prepare_reference(args, run_dir / "harness")
         except (RuntimeError, FileNotFoundError) as exc:
-            print(str(exc), file=sys.stderr)
+            log_error(str(exc))
             return 1
     else:
         # Prefer existing converted reference in the run dir
@@ -266,17 +280,17 @@ def cmd_improve(args: argparse.Namespace) -> int:
             llm_api_key=args.llm_api_key,
         )
     except Exception as exc:  # noqa: BLE001 - CLI boundary
-        print(f"improve failed: {exc}", file=sys.stderr)
+        log_error(f"improve failed: {exc}")
         return 1
 
     summary = report.get("summary", {})
-    print()
-    print("Improve done.")
-    print(f"  checked  : {summary.get('checked')}")
-    print(f"  awkward  : {summary.get('awkward_initial')}")
-    print(f"  replaced : {summary.get('replaced')}")
-    print(f"  report   : {run_dir / 'harness' / 'report.json'}")
-    print(f"  full wav : {run_dir / 'full.wav'}")
+    log("")
+    log("[bold green]Improve done.[/bold green]")
+    log(f"  checked  : {summary.get('checked')}")
+    log(f"  awkward  : {summary.get('awkward_initial')}")
+    log(f"  replaced : {summary.get('replaced')}")
+    log(f"  report   : {run_dir / 'harness' / 'report.json'}")
+    log(f"  full wav : {run_dir / 'full.wav'}")
     return 0
 
 
@@ -290,6 +304,7 @@ def _legacy_argv(argv: list[str]) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    ensure_rich_tqdm()
     raw = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     args = parser.parse_args(_legacy_argv(raw))

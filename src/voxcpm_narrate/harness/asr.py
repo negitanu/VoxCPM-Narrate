@@ -23,7 +23,9 @@ class AsrTranscriber:
                 "funasr is required for --asr. It usually comes with voxcpm."
             ) from exc
 
-        print(f"Loading ASR: {self.model_id} (device={self.device})")
+        from voxcpm_narrate.console import log
+
+        log(f"[bold]Loading ASR:[/bold] {self.model_id} (device={self.device})")
         # SenseVoiceSmall works well for multilingual short clips
         self._model = AutoModel(
             model=self.model_id,

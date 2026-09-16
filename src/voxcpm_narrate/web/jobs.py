@@ -1,88 +1,217 @@
-"""Background job store for the web UI."""
+"""SQLite snapshots and a single, recoverable local worker queue."""
 
 from __future__ import annotations
 
+import copy
+import json
+import queue
+import sqlite3
 import threading
 import traceback
 import uuid
-from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+
+from voxcpm_narrate.console import log_error
+
+ACTIVE = {"queued", "running", "improving"}
 
 
-@dataclass
-class JobState:
-    id: str
-    status: str = "queued"  # queued|running|improving|done|error
-    phase: str = "queued"
-    message: str = "Waiting…"
-    current: int = 0
-    total: int = 0
-    percent: float = 0.0
-    created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
-    updated_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
-    error: str | None = None
-    run_dir: str | None = None
-    download_url: str | None = None
-    duration_sec: float | None = None
-    segment_count: int | None = None
-    improve_enabled: bool = False
-    improve_summary: dict[str, Any] | None = None
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+
+class Conflict(ValueError):
+    pass
+
+
+class Cancelled(Exception):
+    pass
 
 
 class JobManager:
     def __init__(self, root: Path):
-        self.root = root
+        self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
-        self._jobs: dict[str, JobState] = {}
-        self._lock = threading.Lock()
-        self._worker_lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._queue = queue.Queue()
+        self._worker = None
+        self._db = sqlite3.connect(self.root / "productions.sqlite3", check_same_thread=False)
+        self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute("PRAGMA synchronous=FULL")
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, body TEXT NOT NULL)"
+        )
+        self._db.commit()
+        # Never silently restart costly operations after a process restart.
+        for job in self.list():
+            if job["status"] in ACTIVE:
+                job.update(
+                    status="interrupted",
+                    phase="interrupted",
+                    operation=None,
+                    cancel_requested=False,
+                    message="処理が中断されました。再開できます。",
+                )
+                for seg in job["segments"]:
+                    if seg["status"] in {"running", "regenerating", "judging"}:
+                        seg["status"] = "ready" if seg.get("accepted") else "pending"
+                self.save(job)
 
-    def create(self, *, improve_enabled: bool) -> JobState:
-        job_id = uuid.uuid4().hex[:12]
-        state = JobState(id=job_id, improve_enabled=improve_enabled)
+    def save(self, job: dict) -> dict:
         with self._lock:
-            self._jobs[job_id] = state
-        return state
+            snapshot = copy.deepcopy(job)
+            snapshot["updated_at"] = now()
+            with self._db:
+                self._db.execute(
+                    "INSERT OR REPLACE INTO jobs VALUES (?, ?)",
+                    (snapshot["id"], json.dumps(snapshot, ensure_ascii=False)),
+                )
+            return copy.deepcopy(snapshot)
 
-    def get(self, job_id: str) -> JobState | None:
+    def get(self, job_id: str) -> dict:
         with self._lock:
-            return self._jobs.get(job_id)
+            row = self._db.execute("SELECT body FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if not row:
+            raise KeyError("制作が見つかりません")
+        return json.loads(row[0])
 
-    def update(self, job_id: str, **kwargs: Any) -> None:
+    def list(self) -> list[dict]:
         with self._lock:
-            job = self._jobs[job_id]
-            for key, value in kwargs.items():
-                setattr(job, key, value)
-            job.updated_at = datetime.now().isoformat(timespec="seconds")
-            if job.total:
-                job.percent = round(100.0 * job.current / max(job.total, 1), 1)
+            rows = self._db.execute("SELECT body FROM jobs").fetchall()
+        return sorted(
+            (json.loads(row[0]) for row in rows), key=lambda job: job["updated_at"], reverse=True
+        )
+
+    def mutate(self, job_id: str, fn) -> dict:
+        with self._lock:
+            job = self.get(job_id)
+            fn(job)
+            return self.save(job)
+
+    def update(self, job_id: str, **kwargs) -> dict:
+        return self.mutate(job_id, lambda job: job.update(kwargs))
 
     def job_dir(self, job_id: str) -> Path:
+        if not job_id.isalnum():
+            raise ValueError("Invalid job id")
         path = self.root / job_id
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def run_in_background(self, job_id: str, target, *args, **kwargs) -> None:
-        def _runner() -> None:
-            # Serialize heavy GPU/MPS jobs one at a time
-            with self._worker_lock:
-                try:
-                    self.update(job_id, status="running", phase="starting", message="Starting…")
-                    target(job_id, *args, **kwargs)
-                except Exception as exc:  # noqa: BLE001
-                    tb = traceback.format_exc()
-                    print(tb)
-                    self.update(
-                        job_id,
-                        status="error",
-                        phase="error",
-                        message=str(exc),
-                        error=str(exc),
-                    )
+    def checkpoint(self, job_id: str) -> None:
+        if self.get(job_id).get("cancel_requested"):
+            raise Cancelled()
 
-        threading.Thread(target=_runner, daemon=True, name=f"job-{job_id}").start()
+    def submit(self, job_id: str, kind: str, target, *, request_id: str, validate=None) -> dict:
+        with self._lock:
+            job = self.get(job_id)
+            if request_id in job.get("requests", []):
+                return job
+            if job["status"] in ACTIVE:
+                raise Conflict("別の処理が進行中です。完了または中断後に操作してください。")
+            if validate:
+                validate(job)
+            job.update(
+                status="queued",
+                phase=kind,
+                operation=kind,
+                error=None,
+                cancel_requested=False,
+                message="キューで待機しています",
+            )
+            job["requests"] = (job.get("requests", []) + [request_id])[-100:]
+            self.save(job)
+            self._queue.put((job_id, target))
+            if self._worker is None:
+                self._worker = threading.Thread(
+                    target=self._run, daemon=True, name="narration-worker"
+                )
+                self._worker.start()
+            return self.get(job_id)
+
+    def _run(self):
+        while True:
+            item = self._queue.get()
+            if item is None:
+                self._queue.task_done()
+                return
+            job_id, target = item
+            try:
+                self.checkpoint(job_id)
+                self.update(job_id, status="running")
+                target(job_id)
+                self.update(
+                    job_id,
+                    status="done",
+                    phase="done",
+                    operation=None,
+                    cancel_requested=False,
+                    message="保存しました",
+                )
+            except Cancelled:
+                self.update(
+                    job_id,
+                    status="interrupted",
+                    phase="interrupted",
+                    operation=None,
+                    cancel_requested=False,
+                    message="中断しました。保存済みの部分から再開できます。",
+                )
+            except Exception as exc:
+                # Persist the failure before logging: logging must never strand a job.
+                self.update(
+                    job_id,
+                    status="error",
+                    phase="error",
+                    operation=None,
+                    error=str(exc),
+                    message="処理に失敗しました。保存済み音声は保持されています。",
+                )
+                try:
+                    log_error(traceback.format_exc())
+                except Exception:
+                    pass
+            finally:
+
+                def settle(job):
+                    for seg in job["segments"]:
+                        if seg["status"] in {"running", "regenerating", "judging"}:
+                            seg["status"] = "ready" if seg.get("accepted") else "pending"
+
+                self.mutate(job_id, settle)
+                self._queue.task_done()
+
+    def close(self):
+        if self._worker:
+            self._queue.put(None)
+            self._worker.join(timeout=5)
+            if self._worker.is_alive():
+                return
+        self._db.close()
+
+
+def new_job(title: str, script: str, mode: str, config: dict, segments: list) -> dict:
+    return dict(
+        schema_version=1,
+        id=uuid.uuid4().hex[:12],
+        title=title,
+        script=script,
+        mode=mode,
+        config=config,
+        segments=segments,
+        status="draft",
+        phase="draft",
+        message="生成する箇所を選んでください",
+        error=None,
+        created_at=now(),
+        updated_at=now(),
+        operation=None,
+        cancel_requested=False,
+        requests=[],
+        export=None,
+        timings=[],
+        reference_warnings=[],
+        dictionary={},
+        evaluation_count=0,
+    )

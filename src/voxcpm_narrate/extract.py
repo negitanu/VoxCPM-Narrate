@@ -92,7 +92,9 @@ def load_input_blocks(
         return [{"section": path.stem, "text": body}]
 
     if mode == "lines":
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+        lines = [
+            ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")
+        ]
         if not lines:
             raise ValueError(f"No non-empty lines in: {path}")
         return [{"section": path.stem, "text": "\n\n".join(lines)}]
@@ -138,6 +140,8 @@ def load_jobs(
 
 def split_into_segments(text: str, *, max_chars: int) -> list[str]:
     """Split narration into short segments suitable for long-form VoxCPM2."""
+    if max_chars < 1:
+        raise ValueError("max_chars must be positive")
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
     segments: list[str] = []
 
@@ -159,7 +163,17 @@ def split_into_segments(text: str, *, max_chars: int) -> list[str]:
         if chunk:
             segments.append(chunk)
 
-    return segments
+    bounded: list[str] = []
+    for segment in segments:
+        while len(segment) > max_chars:
+            prefix = segment[:max_chars]
+            boundaries = list(re.finditer(r"[、,;；：:\s]", prefix))
+            cut = boundaries[-1].end() if boundaries else max_chars
+            bounded.append(segment[:cut])
+            segment = segment[cut:]
+        if segment:
+            bounded.append(segment)
+    return bounded
 
 
 def build_jobs(

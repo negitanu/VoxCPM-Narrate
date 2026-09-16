@@ -1,163 +1,62 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ja">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>VoxCPM Narrate</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet" />
-  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css" />
-</head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VoxCPM Narrate — ナレーション制作</title><link rel="stylesheet" href="/static/styles.css"></head>
 <body>
-  <header class="top-app-bar">
-    <div class="top-app-bar__row">
-      <span class="material-symbols-outlined brand-icon">record_voice_over</span>
-      <div class="brand">
-        <div class="brand__title">VoxCPM Narrate</div>
-        <div class="brand__subtitle">参照声音 + SSML から読み上げ音声を生成</div>
-      </div>
-    </div>
-  </header>
-
-  <main class="page">
-    <section class="hero-card elevated">
-      <h1>音声をアップロードして、自動でナレーションを作成</h1>
-      <p>
-        参照用の声（約 15〜25 秒）と SSML 台本を選ぶと、ローカルの VoxCPM2 が読み上げ音声を生成します。
-        長い台本は時間がかかります。進捗はこの画面で確認できます。
-      </p>
+<header class="topbar"><a class="brand" href="/">VoxCPM <strong>Narrate</strong></a><span class="muted">ローカル・ナレーションスタジオ</span><span id="health" class="tag">接続確認中</span></header>
+<div class="shell">
+<aside class="sidebar" aria-label="制作一覧">
+  <button id="new-job" class="primary">＋ 新しい制作</button>
+  <h2>ライブラリ</h2><nav id="library" aria-label="保存した制作"></nav>
+  <details class="import"><summary>以前の生成結果を取り込む</summary><label>生成済み run<select id="legacy-runs"></select></label><button id="import-run">コピーして取り込む</button><small>元のファイルは保持します。生成条件が不明な場合は既定値を使用します。</small></details>
+</aside>
+<main>
+<div id="notice" role="status" aria-live="polite" class="notice hidden"></div>
+<section id="setup">
+  <div class="eyebrow">NEW PRODUCTION</div><h1>台本を、伝わる声に。</h1><p class="muted">短く試して、気になる箇所を直しながら仕上げましょう。</p>
+  <form id="job-form">
+    <label>制作名<input id="title" maxlength="150" value="新しいナレーション" required></label>
+    <div class="split"><label>入力形式<select id="mode"><option value="plain">プレーンテキスト</option><option value="markdown">Markdown（読み上げ本文）</option><option value="ssml">SSML</option><option value="lines">行ごとのテキスト</option></select></label><label>台本ファイルを取り込む<input id="script-file" type="file" accept=".txt,.md,.markdown,.ssml,.xml"></label></div>
+    <label>台本 <small>読み込み後の編集内容が生成に使われます</small><textarea id="script" rows="10" placeholder="ここに読み上げる台本を入力してください。" required maxlength="200000"></textarea></label>
+    <div class="split"><label>参照音声（任意）<input id="reference" type="file" accept=".wav,.ogg,.mp3,.flac,.m4a,audio/*"><small>5〜30秒を目安に。未選択なら話し方の指示で生成します。</small><audio id="reference-player" controls class="hidden"></audio></label><label>話し方<input id="control" value="ややゆっくり、落ち着いたプレゼン説明調" maxlength="1000"></label></div>
+    <details><summary>生成の詳細設定</summary><div class="settings-grid">
+      <label>デバイス<select id="device"><option>auto</option><option>mps</option><option>cuda</option><option>cpu</option></select></label>
+      <label>最大文字数<input id="max-chars" type="number" min="10" max="500" value="120"></label>
+      <label>CFG<input id="cfg" type="number" min="0.1" max="5" step="0.1" value="2"></label>
+      <label>生成ステップ<input id="timesteps" type="number" min="1" max="100" value="10"></label>
+      <label>乱数 seed<input id="seed" type="number" min="0" max="2147483647" value="42"></label>
+      <label>改善試行の上限<input id="rounds" type="number" min="0" max="6" value="3"></label>
+    </div><label class="check"><input id="improve" type="checkbox">音響チェックと自動改善を実行</label><label class="check"><input id="asr" type="checkbox">文字起こしで読み誤りも照合（初回はモデル取得）</label><label class="check"><input id="llm" type="checkbox">台本・文字起こし・指標を外部 LLM で評価</label></details>
+    <div class="actions"><button id="preview" type="button">分割を確認</button><button class="primary" type="submit">制作を保存して試聴へ</button></div>
+    <ol id="preview-list" class="preview-list"></ol>
+  </form>
+</section>
+<section id="studio" class="hidden">
+  <div class="eyebrow">PRODUCTION</div><div class="title-row"><h1 id="job-title"></h1><span id="job-status" class="tag"></span></div>
+  <div id="progress" role="progressbar" aria-label="生成済みセグメント" aria-valuemin="0" aria-valuemax="100"><div id="progress-fill"></div></div>
+  <div class="progress-caption"><span id="progress-text" aria-live="polite"></span><span id="timing" class="muted"></span></div>
+  <div class="actions toolbar"><button class="primary" id="generate-all">未生成部分を生成・再開</button><button id="generate-selected">選択箇所を試聴生成</button><button id="cancel" class="hidden">中断する</button><button id="play-all">連続試聴</button><button id="fork-script">台本を編集して新規制作</button></div>
+  <div class="workbench">
+    <section class="segment-list-panel" aria-label="セグメント一覧"><div class="list-heading"><h2>セグメント</h2><select id="filter" aria-label="セグメントの絞り込み"><option value="all">すべて</option><option value="pending">未生成</option><option value="review">要確認・候補あり</option><option value="ready">採用済み</option></select></div><div id="segments"></div></section>
+    <section id="editor" class="editor" aria-label="セグメント編集">
+      <div class="title-row"><h2 id="segment-title"></h2><span id="save-status" class="muted"></span></div>
+      <p id="original-text" class="original"></p>
+      <label>読み上げ本文<textarea id="edit-text" rows="4" maxlength="2000"></textarea></label>
+      <label>読み方の上書き（任意）<input id="edit-reading" maxlength="2000" placeholder="未入力なら本文と読み辞書を使用"></label>
+      <label>話し方<input id="edit-control" maxlength="1000"></label>
+      <label>直前の間（秒）<input id="edit-pause" type="number" min="0" max="10" step="0.05"></label>
+      <div class="actions"><button id="save-edit">編集を保存</button><button id="resolve-edit" class="hidden">保持した編集を最新状態に適用</button><button class="primary" id="regenerate">候補を再生成</button></div>
+      <p class="muted small">編集の保存だけでは音声は変わりません。候補を生成し、試聴してから採用してください。</p>
+      <h3>音声の比較と採用</h3><div id="versions"></div>
+      <details id="feedback-panel"><summary>音声を聴いて改善提案</summary><p class="muted small">採用中の音声と本文を OpenRouter に送信します。提案は自動で採用されません（制作あたり最大50回）。</p><button id="judge">外部評価を実行</button><p id="feedback-text"></p><div id="suggestion" class="hidden"><label>提案された本文<textarea id="suggested-text" rows="3" readonly></textarea></label><p id="suggested-control" class="muted"></p><button id="use-suggestion">提案を編集欄に取り込む</button></div></details>
     </section>
-
-    <form id="job-form" class="layout">
-      <div class="column">
-        <article class="card elevated">
-          <div class="card__header">
-            <span class="material-symbols-outlined">mic</span>
-            <h2>1. 参照声音</h2>
-          </div>
-          <p class="card__hint">WAV / OGG / MP3 など。クローンの声色になります。</p>
-          <label class="dropzone" id="ref-dropzone">
-            <input type="file" id="reference" name="reference" accept="audio/*,.wav,.ogg,.mp3,.flac,.m4a" required hidden />
-            <span class="material-symbols-outlined dropzone__icon">upload_file</span>
-            <span class="dropzone__title">ファイルを選択またはドロップ</span>
-            <span class="dropzone__file" id="ref-filename">未選択</span>
-          </label>
-          <audio id="ref-preview" controls class="audio-preview hidden"></audio>
-        </article>
-
-        <article class="card elevated">
-          <div class="card__header">
-            <span class="material-symbols-outlined">description</span>
-            <h2>2. SSML 台本</h2>
-          </div>
-          <p class="card__hint">.ssml / .xml。または下に直接貼り付けもできます。</p>
-          <label class="dropzone" id="ssml-dropzone">
-            <input type="file" id="ssml" name="ssml" accept=".ssml,.xml,text/xml,application/xml,text/plain" hidden />
-            <span class="material-symbols-outlined dropzone__icon">code</span>
-            <span class="dropzone__title">SSML ファイルを選択</span>
-            <span class="dropzone__file" id="ssml-filename">未選択</span>
-          </label>
-          <label class="field">
-            <span class="field__label">SSML テキスト（ファイルの代わりに利用可）</span>
-            <textarea id="ssml-text" rows="10" placeholder="&lt;speak xml:lang=&quot;ja-JP&quot;&gt;…&lt;/speak&gt;"></textarea>
-          </label>
-        </article>
-      </div>
-
-      <div class="column">
-        <article class="card elevated">
-          <div class="card__header">
-            <span class="material-symbols-outlined">tune</span>
-            <h2>3. 設定</h2>
-          </div>
-
-          <label class="field">
-            <span class="field__label">話し方コントロール</span>
-            <input type="text" id="control" value="ややゆっくり、落ち着いたプレゼン説明調" />
-          </label>
-
-          <label class="field">
-            <span class="field__label">デバイス</span>
-            <select id="device">
-              <option value="auto" selected>auto（推奨）</option>
-              <option value="mps">mps（Apple Silicon）</option>
-              <option value="cuda">cuda</option>
-              <option value="cpu">cpu</option>
-            </select>
-          </label>
-
-          <div class="field-row">
-            <label class="field">
-              <span class="field__label">最大文字 / セグメント</span>
-              <input type="number" id="max_chars" value="120" min="40" max="300" />
-            </label>
-            <label class="field">
-              <span class="field__label">CFG</span>
-              <input type="number" id="cfg_value" value="2.0" min="1.0" max="3.0" step="0.1" />
-            </label>
-          </div>
-
-          <div class="switches">
-            <label class="switch">
-              <input type="checkbox" id="improve" checked />
-              <span class="switch__track"></span>
-              <span class="switch__label">
-                <strong>自己改善ループ</strong>
-                <small>違和感セグメントを再生成して置換</small>
-              </span>
-            </label>
-            <label class="switch">
-              <input type="checkbox" id="improve_asr" checked />
-              <span class="switch__track"></span>
-              <span class="switch__label">
-                <strong>ASR 採点</strong>
-                <small>SenseVoice で読み誤りも検出（初回ダウンロードあり）</small>
-              </span>
-            </label>
-          </div>
-
-          <label class="field">
-            <span class="field__label">改善ラウンド数</span>
-            <input type="number" id="improve_rounds" value="3" min="0" max="6" />
-          </label>
-
-          <button type="submit" class="btn-filled" id="submit-btn">
-            <span class="material-symbols-outlined">play_arrow</span>
-            音声を作成
-          </button>
-        </article>
-
-        <article class="card elevated" id="progress-card">
-          <div class="card__header">
-            <span class="material-symbols-outlined">monitoring</span>
-            <h2>進捗</h2>
-          </div>
-          <div class="status-chip" id="status-chip">待機中</div>
-          <div class="progress">
-            <div class="progress__bar" id="progress-bar" style="width: 0%"></div>
-          </div>
-          <p class="progress__meta" id="progress-meta">ジョブ未開始</p>
-          <p class="progress__message" id="progress-message">参照声音と SSML を用意して開始してください。</p>
-
-          <div id="result-panel" class="result-panel hidden">
-            <audio id="result-audio" controls class="audio-preview"></audio>
-            <a class="btn-tonal" id="download-btn" href="#">
-              <span class="material-symbols-outlined">download</span>
-              WAV をダウンロード
-            </a>
-            <p class="result-stats" id="result-stats"></p>
-          </div>
-        </article>
-      </div>
-    </form>
-  </main>
-
-  <footer class="footer">
-    Local VoxCPM2 · Material Design UI · <span id="health">checking…</span>
-  </footer>
-
-  <script src="/static/app.js"></script>
-</body>
-</html>
+  </div>
+  <details><summary>この制作の読み辞書</summary><label>1行に「表記=読み」を入力<textarea id="dictionary" rows="4" placeholder="VoxCPM=ボックスシーピーエム"></textarea></label><button id="save-dictionary">読み辞書を保存</button><p class="muted small">保存後に生成する音声に適用します。元の台本表記は保持します。</p></details>
+  <div class="export-row"><h2>書き出し</h2><p id="export-note" class="muted">すべてのセグメントを生成すると書き出せます。</p><div id="exports" class="actions hidden"><a id="download" class="button" download>全体 WAV</a><a id="download-normalized" class="button" download>ピークを −1 dB に揃えた WAV</a><a id="archive" class="button" download>音声・台本・条件 ZIP</a><button id="play-full">全体を再生</button></div></div>
+</section>
+<details id="external-settings"><summary>外部評価の設定</summary><p class="muted small">キーはこのタブのメモリ内だけで扱います。サーバーの OPENROUTER_API_KEY も利用できます。</p><div class="split"><label>OpenRouter API キー<input id="api-key" type="password" autocomplete="off"></label><label>評価モデル<select id="llm-model"></select></label></div><div class="actions"><button id="refresh-models">モデル一覧を更新</button><button id="clear-key">入力キーと旧保存キーを消去</button></div><p id="key-status" class="muted small"></p></details>
+</main>
+</div>
+<footer class="player"><div><strong id="player-label">試聴プレイヤー</strong><span id="player-detail" class="muted"></span></div><audio id="audio" controls preload="none"></audio><button id="stop">停止</button></footer>
+<script src="/static/app.js"></script>
+</body></html>

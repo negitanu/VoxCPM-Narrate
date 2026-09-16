@@ -7,8 +7,9 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from voxcpm_narrate.console import ensure_rich_tqdm, log, progress_session
 from voxcpm_narrate.harness.asr import AsrTranscriber
-from voxcpm_narrate.harness.judge import LocalLlmJudge
+from voxcpm_narrate.harness.judge import LlmJudge
 from voxcpm_narrate.harness.metrics import (
     SegmentScore,
     char_error_rate,
@@ -33,7 +34,7 @@ def evaluate_segment(
     sample_rate: int,
     wav_path: Path | None,
     asr: AsrTranscriber | None,
-    judge: LocalLlmJudge | None,
+    judge: LlmJudge | None,
     awkward_threshold: float,
 ) -> SegmentScore:
     duration_sec = float(len(wav) / sample_rate) if sample_rate else 0.0
@@ -103,6 +104,7 @@ def run_improve_loop(
     llm_api_key: str,
 ) -> dict[str, Any]:
     import soundfile as sf
+    from voxcpm_narrate.artifacts import write_wav
 
     run_dir = run_dir.resolve()
     manifest_path = run_dir / "manifest.json"
@@ -120,9 +122,7 @@ def run_improve_loop(
 
     asr = AsrTranscriber(device=asr_device) if use_asr else None
     judge = (
-        LocalLlmJudge(base_url=llm_base_url, model=llm_model, api_key=llm_api_key)
-        if use_llm
-        else None
+        LlmJudge(base_url=llm_base_url, model=llm_model, api_key=llm_api_key) if use_llm else None
     )
 
     # Probe sample rate from first existing wav
@@ -166,130 +166,152 @@ def run_improve_loop(
     improved_count = 0
     awkward_count = 0
 
-    for idx, job in enumerate(selected_jobs, start=1):
-        seg_id = str(job["id"])
-        text = str(job["text"])
-        seg_path = segments_dir / f"{seg_id}.wav"
-        if not seg_path.is_file():
-            print(f"[skip] missing wav: {seg_path}")
-            continue
+    ensure_rich_tqdm()
+    with progress_session() as progress:
+        task_id = progress.add_task("Improve", total=len(selected_jobs))
+        for idx, job in enumerate(selected_jobs, start=1):
+            seg_id = str(job["id"])
+            text = str(job["text"])
+            seg_path = segments_dir / f"{seg_id}.wav"
+            progress.update(task_id, description=f"[[{idx}/{len(selected_jobs)}]] {seg_id}")
+            if not seg_path.is_file():
+                log(f"[yellow]skip[/yellow] missing wav: {seg_path}")
+                progress.advance(task_id)
+                continue
 
-        wav, sr = sf.read(seg_path, dtype="float32")
-        wav = wav.reshape(-1)
-        score = evaluate_segment(
-            segment_id=seg_id,
-            text=text,
-            wav=wav,
-            sample_rate=sr,
-            wav_path=seg_path,
-            asr=asr,
-            judge=judge,
-            awkward_threshold=awkward_threshold,
-        )
-        print(
-            f"[{idx}/{len(selected_jobs)}] {seg_id} overall={score.overall:.3f} "
-            f"awkward={score.awkward} reasons={score.reasons}"
-        )
-
-        entry: dict[str, Any] = {
-            "id": seg_id,
-            "text": text,
-            "initial": score.to_dict(),
-            "attempts": [],
-            "replaced": False,
-            "final": score.to_dict(),
-        }
-
-        if score.awkward:
-            awkward_count += 1
-
-        should_retry = score.awkward or not only_awkward
-        if max_rounds <= 0 or not should_retry:
-            report["segments"].append(entry)
-            continue
-
-        if model is None:
-            model = load_model(model_id, device=device, optimize=optimize)
-
-        best_score = score
-        best_wav = wav
-        strategies = build_strategies(base, max_rounds=max_rounds)
-
-        for strategy_name, params in strategies:
-            print(f"  -> retry {strategy_name}: {params.to_dict()}")
-            retry_control = params.control
-            if job.get("ssml_style"):
-                retry_control = merge_control(params.control, str(job["ssml_style"]))
-            elif job.get("control") and strategy_name in {
-                "seed_jitter",
-                "lower_cfg",
-                "more_steps",
-            }:
-                retry_control = str(job["control"])
-
-            cand_wav = generate_wav(
-                model,
-                text=text,
-                control=retry_control,
-                reference_audio=reference_audio,
-                cfg_value=params.cfg_value,
-                inference_timesteps=params.inference_timesteps,
-                normalize=params.normalize,
-                seed=params.seed,
-            )
-            cand_path = candidates_dir / f"{seg_id}__{strategy_name}.wav"
-            sf.write(cand_path, cand_wav, sample_rate)
-
-            cand_score = evaluate_segment(
+            wav, sr = sf.read(seg_path, dtype="float32")
+            wav = wav.reshape(-1)
+            score = evaluate_segment(
                 segment_id=seg_id,
                 text=text,
-                wav=cand_wav,
-                sample_rate=sample_rate,
-                wav_path=cand_path,
+                wav=wav,
+                sample_rate=sr,
+                wav_path=seg_path,
                 asr=asr,
                 judge=judge,
                 awkward_threshold=awkward_threshold,
             )
-            attempt = {
-                "strategy": strategy_name,
-                "params": params.to_dict(),
-                "score": cand_score.to_dict(),
-                "path": str(cand_path),
+            awkward_style = "red" if score.awkward else "green"
+            log(
+                f"[cyan][[{idx}/{len(selected_jobs)}]][/cyan] {seg_id} "
+                f"overall=[bold]{score.overall:.3f}[/bold] "
+                f"awkward=[{awkward_style}]{score.awkward}[/{awkward_style}] "
+                f"reasons={score.reasons}"
+            )
+
+            entry: dict[str, Any] = {
+                "id": seg_id,
+                "text": text,
+                "initial": score.to_dict(),
+                "attempts": [],
+                "replaced": False,
+                "final": score.to_dict(),
             }
-            entry["attempts"].append(attempt)
-            print(
-                f"     score={cand_score.overall:.3f} awkward={cand_score.awkward} "
-                f"reasons={cand_score.reasons}"
-            )
 
-            if cand_score.overall > best_score.overall:
-                best_score = cand_score
-                best_wav = cand_wav
+            if score.awkward:
+                awkward_count += 1
 
-            # Early stop if no longer awkward and improved
-            if not cand_score.awkward and cand_score.overall >= awkward_threshold:
-                best_score = cand_score
-                best_wav = cand_wav
-                break
+            should_retry = score.awkward or not only_awkward
+            if max_rounds <= 0 or not should_retry:
+                report["segments"].append(entry)
+                progress.advance(task_id)
+                continue
 
-        if best_score.overall > score.overall + 0.01:
-            # backup original once
-            backup = work_dir / "originals" / f"{seg_id}.wav"
-            backup.parent.mkdir(parents=True, exist_ok=True)
-            if not backup.exists():
-                shutil.copy2(seg_path, backup)
-            sf.write(seg_path, best_wav, sample_rate)
-            entry["replaced"] = True
-            entry["final"] = best_score.to_dict()
-            improved_count += 1
-            print(
-                f"  ✓ replaced {seg_id}: {score.overall:.3f} -> {best_score.overall:.3f}"
-            )
-        else:
-            entry["final"] = best_score.to_dict()
-            print(f"  · keep original {seg_id} (no better candidate)")
+            if model is None:
+                model = load_model(model_id, device=device, optimize=optimize)
 
-        report["segments"].append(entry)
+            best_score = score
+            best_wav = wav
+            strategies = build_strategies(base, max_rounds=max_rounds)
+
+            for strategy_name, params in strategies:
+                log(f"  -> retry [magenta]{strategy_name}[/magenta]: {params.to_dict()}")
+                retry_control = params.control
+                if job.get("ssml_style"):
+                    retry_control = merge_control(params.control, str(job["ssml_style"]))
+                elif job.get("control") and strategy_name in {
+                    "seed_jitter",
+                    "lower_cfg",
+                    "more_steps",
+                }:
+                    retry_control = str(job["control"])
+
+                cand_wav = generate_wav(
+                    model,
+                    text=text,
+                    control=retry_control,
+                    reference_audio=reference_audio,
+                    cfg_value=params.cfg_value,
+                    inference_timesteps=params.inference_timesteps,
+                    normalize=params.normalize,
+                    seed=params.seed,
+                )
+                cand_path = candidates_dir / f"{seg_id}__{strategy_name}.wav"
+                write_wav(cand_path, cand_wav, sample_rate)
+
+                cand_score = evaluate_segment(
+                    segment_id=seg_id,
+                    text=text,
+                    wav=cand_wav,
+                    sample_rate=sample_rate,
+                    wav_path=cand_path,
+                    asr=asr,
+                    judge=judge,
+                    awkward_threshold=awkward_threshold,
+                )
+                attempt = {
+                    "strategy": strategy_name,
+                    "params": params.to_dict(),
+                    "score": cand_score.to_dict(),
+                    "path": str(cand_path),
+                }
+                entry["attempts"].append(attempt)
+                log(
+                    f"     score={cand_score.overall:.3f} awkward={cand_score.awkward} "
+                    f"reasons={cand_score.reasons}"
+                )
+
+                comparable = judge is None or (
+                    cand_score.llm_score is not None and score.llm_score is not None
+                )
+                if (
+                    comparable
+                    and not cand_score.awkward
+                    and cand_score.overall > best_score.overall
+                ):
+                    best_score = cand_score
+                    best_wav = cand_wav
+
+                # Early stop if no longer awkward and improved
+                if (
+                    comparable
+                    and not cand_score.awkward
+                    and cand_score.overall > score.overall + 0.01
+                ):
+                    best_score = cand_score
+                    best_wav = cand_wav
+                    break
+
+            if best_score.overall > score.overall + 0.01:
+                # backup original once
+                backup = work_dir / "originals" / f"{seg_id}.wav"
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                if not backup.exists():
+                    shutil.copy2(seg_path, backup)
+                write_wav(seg_path, best_wav, sample_rate)
+                entry["replaced"] = True
+                entry["final"] = best_score.to_dict()
+                improved_count += 1
+                log(
+                    f"  [green]✓ replaced[/green] {seg_id}: "
+                    f"{score.overall:.3f} -> {best_score.overall:.3f}"
+                )
+            else:
+                entry["final"] = score.to_dict()
+                log(f"  · keep original {seg_id} (no better candidate)")
+
+            report["segments"].append(entry)
+            progress.advance(task_id)
 
     report["summary"] = {
         "checked": len(report["segments"]),
@@ -298,8 +320,10 @@ def run_improve_loop(
     }
 
     report_path = work_dir / "report.json"
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"Wrote harness report: {report_path}")
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    log(f"[green]Wrote harness report:[/green] {report_path}")
 
     # Reassemble full.wav with possibly updated segments
     assemble_full_wav(
@@ -328,5 +352,5 @@ def run_improve_loop(
             f"{','.join(seg['final'].get('reasons') or [])} |"
         )
     summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"Wrote summary: {summary_path}")
+    log(f"[green]Wrote summary:[/green] {summary_path}")
     return report
