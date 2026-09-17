@@ -202,6 +202,7 @@ class ProductionService:
         wav = generate_wav(model, text=spoken, control=seg["draft"]["control"],
                            reference_audio=self._reference_audio(jid, cfg),
                            reference_transcript=cfg.get("reference_transcript"),
+                           number_reading_style=seg['draft'].get('number_reading_style') or cfg.get('number_reading_style', 'hiragana'),
                            cfg_value=cfg["cfg_value"], inference_timesteps=cfg["timesteps"],
                            normalize=self._convert_numbers(seg['draft'], cfg), seed=cfg["seed"], input_metadata=metadata)
         preview_id = uuid.uuid4().hex
@@ -248,6 +249,7 @@ class ProductionService:
             cfg_value=cfg["cfg_value"],
             inference_timesteps=cfg["timesteps"],
             normalize=self._convert_numbers(draft, cfg),
+            number_reading_style=draft.get('number_reading_style') or cfg.get('number_reading_style', 'hiragana'),
             seed=cfg["seed"] if seed is None else seed,
         )
         params.update(overrides or {})
@@ -428,7 +430,7 @@ class ProductionService:
             status="ready",
             revision=seg["revision"] + 1,
             error=None,
-            draft={key: v.get(key) for key in ("text", "reading", "control", "pause_before_sec", "convert_numbers")},
+            draft={key: v.get(key) for key in ("text", "reading", "control", "pause_before_sec", "convert_numbers", "number_reading_style")},
             feedback=None,
         )
         # Build first; a crash leaves the previous accepted snapshot untouched.
@@ -474,7 +476,7 @@ class ProductionService:
                 seg["history"].append(seg["accepted"])
             seg.update(accepted=v["id"], status="ready", revision=seg["revision"] + 1,
                        error=None, feedback=None,
-                       draft={key: v.get(key) for key in ("text", "reading", "control", "pause_before_sec", "convert_numbers")})
+                       draft={key: v.get(key) for key in ("text", "reading", "control", "pause_before_sec", "convert_numbers", "number_reading_style")})
         export = self._build_export(job)
         # Publish all accepted versions together; never leave a partially replaced production.
         with self.manager._lock:

@@ -55,6 +55,7 @@ class Validated(BaseModel):
 
 
 class Config(Validated):
+    number_reading_style: Literal['hiragana', 'kanji'] = 'kanji'
     convert_numbers: bool = True
     device: Literal["auto", "cpu", "mps", "cuda"] = "auto"
     control: str = Field(default="日本語、明瞭な声、自然な抑揚、会話に近いテンポ", max_length=1000)
@@ -79,6 +80,7 @@ class PreviewBody(Validated):
 
 
 class Draft(Validated):
+    number_reading_style: Literal['hiragana', 'kanji'] | None = None
     convert_numbers: bool | None = None
     text: str = Field(min_length=1, max_length=2000)
     reading: str = Field(default="", max_length=2000)
@@ -192,7 +194,7 @@ def preview(body: PreviewBody):
     from voxcpm_narrate.japanese import japanese_numbers
     segments = parse_script(body.script, body.mode, body.config.max_chars, body.config.control)
     for item in segments:
-        item['prepared_reading'] = japanese_numbers(item['text']) if body.config.convert_numbers else item['text']
+        item['prepared_reading'] = japanese_numbers(item['text'], style=body.config.number_reading_style) if body.config.convert_numbers else item['text']
     return {"segments": segments}
 
 

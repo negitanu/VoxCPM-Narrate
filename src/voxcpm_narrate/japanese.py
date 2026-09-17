@@ -50,7 +50,40 @@ def number_reading(value: str) -> str:
     return sign + integer_reading(value)
 
 
-def japanese_numbers(text: str) -> str:
+def kanji_number(value: str) -> str:
+    """Preserve a number's lexical identity instead of flattening it to kana."""
+    value = value.replace(',', '')
+    if value.startswith('-'):
+        return 'マイナス' + kanji_number(value[1:])
+    digits = '零一二三四五六七八九'
+    if '.' in value:
+        whole, fraction = value.split('.')
+        return kanji_number(whole) + '点' + ''.join(digits[int(c)] for c in fraction)
+    if len(value) > 16 or (len(value) > 1 and value.startswith('0')):
+        return ''.join(digits[int(c)] for c in value)
+    number = int(value)
+    if not number:
+        return '零'
+    groups = []
+    for large in ('', '万', '億', '兆'):
+        number, group = divmod(number, 10000)
+        if not group:
+            continue
+        parts = []
+        for divisor, unit in ((1000, '千'), (100, '百'), (10, '十')):
+            count, group = divmod(group, divisor)
+            if count:
+                parts.append((digits[count] if count > 1 else '') + unit)
+        if group:
+            parts.append(digits[group])
+        groups.append(''.join(parts) + large)
+    return ''.join(reversed(groups))
+
+
+def japanese_numbers(text: str, *, style: str = 'hiragana') -> str:
+    if style not in ('hiragana', 'kanji'):
+        raise ValueError('Unsupported number reading style')
+
     # Normalize only numeric width, leaving user readings and punctuation intact.
     text = re.sub(r"[０-９％．，]", lambda m: unicodedata.normalize("NFKC", m[0]), text)
     # Only unambiguous, valid year/month/day dates; leave IDs and versions alone.
@@ -63,6 +96,15 @@ def japanese_numbers(text: str) -> str:
         return f'{year}年{month}月{day}日'
     text = re.sub(r'(?<![A-Za-z0-9_./-])(\d{4})([/-])(\d{1,2})\2(\d{1,2})(?![A-Za-z0-9_./-])',
                   calendar_date, text)
+    if style == 'kanji':
+        # Keep counters and adjacent particles in their original orthography:
+        # 二千二十六年に, 二人で, 一日間. No invented POS/SSML tokens.
+        text = re.sub(r'(?<![A-Za-z\d.])0+(\d+)(?=[年月日時分])', r'\1', text)
+        numeric = r'-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?'
+        text = re.sub(rf'(?<![A-Za-z\d.])({numeric})\s*%',
+                      lambda m: kanji_number(m[1]) + 'パーセント', text)
+        return re.sub(rf'(?<![A-Za-z\d.])({numeric})(?![A-Za-z\d.]|,\d)',
+                      lambda m: kanji_number(m[1]), text)
     text = re.sub(r"(?<![\d.])(\d{1,4})年", lambda m: integer_reading(m[1]) + "ねん", text)
     months = {4: "しがつ", 7: "しちがつ", 9: "くがつ"}
     days = {1: "ついたち", 2: "ふつか", 3: "みっか", 4: "よっか", 5: "いつか",

@@ -20,6 +20,28 @@ from voxcpm_narrate.japanese import LEGACY_CONTROL, japanese_numbers
 
 
 class InputTests(unittest.TestCase):
+    def test_semantic_numbers_preserve_counters_particles_and_manual_readings(self):
+        self.assertEqual(japanese_numbers('2026年に2人で8月26日から1日間、300本を運ぶ。', style='kanji'),
+                         '二千二十六年に二人で八月二十六日から一日間、三百本を運ぶ。')
+        self.assertEqual(japanese_numbers('にせんにじゅうろくに、VoxCPM2 v1.23。', style='kanji'),
+                         'にせんにじゅうろくに、VoxCPM2 v1.23。')
+        self.assertEqual(japanese_numbers('2026/08/26、12,800円、-3.5度、001。', style='kanji'),
+                         '二千二十六年八月二十六日、一万二千八百円、マイナス三点五度、零零一。')
+
+    def test_semantic_numbers_reach_model_without_pos_markup(self):
+        model = Mock()
+        model.generate.return_value = np.ones(10, dtype='float32')
+        metadata = {}
+        generate_wav(model, text='2026年に開催します。', control='', reference_audio='voice.wav',
+                     reference_transcript='2025年に開催しました。', cfg_value=2, inference_timesteps=10,
+                     normalize=True, number_reading_style='kanji', seed=42, input_metadata=metadata)
+        args = model.generate.call_args.kwargs
+        self.assertEqual(args['text'], '二千二十六年に開催します。')
+        self.assertEqual(args['prompt_text'], '2025年に開催しました。')
+        self.assertFalse(args['normalize'])
+        self.assertEqual(metadata['number_reading_style_used'], 'kanji')
+        self.assertEqual(prepare_input('2026年に', '', False, number_reading_style='kanji')['prepared_reading'], '2026年に')
+
     def test_japanese_numbers_and_controls_are_preserved(self):
         text = "9月16日は、3.5キロを走ります。"
         with patch("voxcpm_narrate.text_input._normalizer") as normalizer:

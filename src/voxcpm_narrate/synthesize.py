@@ -104,6 +104,7 @@ def generate_wav(
     output_language: str = "ja",
     reference_transcript: str | None = None,
     retry_badcase: bool = True,
+    number_reading_style: str = 'hiragana',
 ):
     ensure_rich_tqdm()
     import numpy as np
@@ -117,7 +118,8 @@ def generate_wav(
     # ``prompt_text + target_text`` to the model. A parenthesised instruction would be
     # spoken aloud as English there, so the target text must be the script alone.
     prepared = prepare_input(text, control, normalize, language=output_language,
-                             voice_instruction=not reference_transcript)
+                             voice_instruction=not reference_transcript,
+                             number_reading_style=number_reading_style)
     if input_metadata is not None:
         input_metadata.update(prepared)
         input_metadata["runtime"] = getattr(model, "narrate_provenance", None)

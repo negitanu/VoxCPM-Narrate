@@ -5,7 +5,7 @@ from functools import lru_cache
 
 from voxcpm_narrate.japanese import DEFAULT_CONTROL, JAPANESE_VOICE, LEGACY_CONTROL, japanese_numbers
 
-INPUT_VERSION = "japanese-reading-v4"
+INPUT_VERSION = "japanese-reading-v5"
 JAPANESE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uff66-\uff9f]")
 
 
@@ -17,7 +17,7 @@ def _normalizer():
 
 
 def prepare_input(text: str, control: str | None, normalize: bool, *, language: str = "ja",
-                  voice_instruction: bool = True) -> dict:
+                  voice_instruction: bool = True, number_reading_style: str = 'hiragana') -> dict:
     """Prepare Japanese readings and a supported English language/style instruction.
 
     ``auto`` is reserved for reproducible comparisons of already-prepared input.
@@ -28,7 +28,7 @@ def prepare_input(text: str, control: str | None, normalize: bool, *, language: 
     if language not in ("ja", "auto"):
         raise ValueError("Unsupported output language")
     mode = "japanese-readings" if normalize else "preserved"
-    spoken = japanese_numbers(text) if normalize else text
+    spoken = japanese_numbers(text, style=number_reading_style) if normalize else text
     instruction = (control or "").strip()
     if not voice_instruction:
         instruction = ""
@@ -45,6 +45,7 @@ def prepare_input(text: str, control: str | None, normalize: bool, *, language: 
         "model_input": instruction + spoken,
         "voice_instruction": instruction or None,
         "prepared_reading": spoken,
+        "number_reading_style_used": number_reading_style if normalize else None,
         "text_preparation": mode,
         "text_preparation_version": INPUT_VERSION,
         "output_language": language,

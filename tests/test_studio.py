@@ -90,14 +90,15 @@ class StudioTests(unittest.TestCase):
         job = self.run_all(created['id'])
         seg = job['segments'][0]
         self.assertEqual(seg['versions'][0]['prepared_reading'], text)
-        draft = {**seg['draft'], 'convert_numbers': True}
+        draft = {**seg['draft'], 'convert_numbers': True, 'number_reading_style': 'kanji'}
         self.service.edit(job['id'], seg['id'], seg['revision'], draft)
         self.service.regenerate(job['id'], seg['id'])
         candidate = self.manager.get(job['id'])['segments'][0]['versions'][-1]
         self.assertEqual(candidate['prepared_reading'],
-                         '開催日はにせんにじゅうろくねんはちがつにじゅうろくにちです。')
+                         '開催日は二千二十六年八月二十六日です。')
         self.service.adopt(job['id'], seg['id'], candidate['id'])
         self.assertTrue(self.manager.get(job['id'])['segments'][0]['draft']['convert_numbers'])
+        self.assertEqual(self.manager.get(job['id'])['segments'][0]['draft']['number_reading_style'], 'kanji')
 
     def test_number_reading_preview_toggle_and_calendar_formats(self):
         text = '開催日は2026/08/26です。'
@@ -106,7 +107,7 @@ class StudioTests(unittest.TestCase):
                 'config': {'convert_numbers': enabled}})
             self.assertEqual(response.status_code, 200, response.text)
             reading = response.json()['segments'][0]['prepared_reading']
-            self.assertEqual(reading, '開催日はにせんにじゅうろくねんはちがつにじゅうろくにちです。'
+            self.assertEqual(reading, '開催日は二千二十六年八月二十六日です。'
                              if enabled else text)
 
     def test_recheck_legacy_candidate_without_generating_or_changing_audio(self):
@@ -451,7 +452,7 @@ class StudioTests(unittest.TestCase):
         job = self.run_all(self.create("消費税は10%です。")['id'])
         seg = job["segments"][0]
         candidate = version(seg)
-        self.assertIn("じゅうパーセント", candidate["model_input"])
+        self.assertIn("十パーセント", candidate["model_input"])
         self.assertIn("speaking Japanese", candidate["model_input"])
         self.assertEqual(candidate["text_preparation"], "japanese-readings")
         self.assertEqual(sf.info(str(self.service.audio_path(job["id"], seg["id"]))).subtype,

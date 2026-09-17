@@ -49,7 +49,8 @@
       </div>
     </section>
     <label class="check"><input id="convert-numbers" type="checkbox" checked>数字・日付を日本語の読みに変換する</label>
-    <p class="muted small">例：2026年8月26日 → にせんにじゅうろくねんはちがつにじゅうろくにち。「分割を確認」で変換後の読みを確認できます。型番などは読み方の上書きで指定してください。</p>
+    <label>数字の渡し方<select id="number-reading-style"><option value="kanji">漢数字＋助数詞を保持</option><option value="hiragana">ひらがな（従来）</option></select><small>「2026年に」→「二千二十六年に」。数詞と助詞を区別しやすい表記を残します。数字変換がオンのときに適用します。</small></label>
+    <p class="muted small">例：2026年8月26日 → 二千二十六年八月二十六日。「分割を確認」で生成に渡す表記を確認できます。型番などは読み方の上書きで指定してください。</p>
     <details><summary>生成の詳細設定</summary><div class="settings-grid">
       <label>デバイス<select id="device"><option>auto</option><option>mps</option><option>cuda</option><option>cpu</option></select></label>
       <label>最大文字数<input id="max-chars" type="number" min="10" max="500" value="120"></label>
@@ -79,6 +80,7 @@
       <label>読み上げ本文<textarea id="edit-text" rows="4" maxlength="2000"></textarea></label>
       <label>読み方の上書き（任意）<input id="edit-reading" maxlength="2000" placeholder="未入力なら本文と読み辞書を使用"></label>
       <label>数字・日付の日本語読み<select id="edit-convert-numbers"><option value="">制作の設定に従う</option value="true">変換する</option><option value="false">変換しない</option></select><small>保存後の再生成から反映します。読み方の上書き・辞書の適用後に変換します。</small></label>
+      <label>数字の渡し方<select id="edit-number-reading-style"><option value="">制作の設定に従う</option><option value="kanji">漢数字＋助数詞を保持</option><option value="hiragana">ひらがな（従来）</option></select><small>数字変換をオンにして保存・再生成してください。手入力したかなの読みはそのまま使用します。</small></label>
       <label>話し方<input id="edit-control" maxlength="1000"></label>
       <label>直前の間（秒）<input id="edit-pause" type="number" min="0" max="10" step="0.05"></label>
       <div class="actions"><button id="save-edit">編集を保存</button><button id="resolve-edit" class="hidden">保持した編集を最新状態に適用</button><button class="primary" id="regenerate">候補を再生成</button></div>

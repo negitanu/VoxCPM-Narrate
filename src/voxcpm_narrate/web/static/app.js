@@ -35,6 +35,7 @@
   const request = () => ({request_id:crypto.randomUUID(),api_key:$("api-key").value.trim()});
   const config = () => ({device:$("device").value,control:$("control").value,max_chars:+$("max-chars").value,
     convert_numbers:$("convert-numbers").checked,
+    number_reading_style:$("number-reading-style").value,
     pace_mode:$("pace-mode").value,target_mora_rate:+$("target-mora-rate").value,
     cfg_value:+$("cfg").value,timesteps:+$("timesteps").value,seed:+$("seed").value,
     improve:$("improve").checked,improve_asr:$("asr").checked,improve_llm:$("llm").checked,
@@ -122,7 +123,7 @@
     });
   };
   function editValue() {
-    return {text:$("edit-text").value,reading:$("edit-reading").value,control:$("edit-control").value,pause_before_sec:+$("edit-pause").value,convert_numbers:$("edit-convert-numbers").value === "" ? null : $("edit-convert-numbers").value === "true"};
+    return {text:$("edit-text").value,reading:$("edit-reading").value,control:$("edit-control").value,pause_before_sec:+$("edit-pause").value,convert_numbers:$("edit-convert-numbers").value === "" ? null : $("edit-convert-numbers").value === "true",number_reading_style:$("edit-number-reading-style").value || null};
   }
   function trackEdit() {
     const seg = current(); if(!seg) return;
@@ -130,7 +131,7 @@
     store(draftKey(job.id,seg.id), {draft:editValue(),revision:prior?.revision ?? seg.revision,base:prior?.base ?? seg.draft});
     $("save-status").textContent = "未保存（このブラウザに一時保存）";
   }
-  ["edit-text","edit-reading","edit-control","edit-pause","edit-convert-numbers"].forEach(id => $(id).addEventListener("input", trackEdit));
+  ["edit-text","edit-reading","edit-control","edit-pause","edit-convert-numbers","edit-number-reading-style"].forEach(id => $(id).addEventListener("input", trackEdit));
   async function saveEdit() {
     const seg = current(); if(!seg) return;
     const local = readLocal(draftKey(job.id,seg.id)); if(!local) return;
@@ -144,6 +145,8 @@
     const local = readLocal(draftKey(job.id,seg.id)); const draft = local?.draft || seg.draft;
     $("edit-text").value = draft.text; $("edit-reading").value = draft.reading;
     $("edit-convert-numbers").value = draft.convert_numbers == null ? "" : String(draft.convert_numbers);
+    $("edit-number-reading-style").value = draft.number_reading_style || "";
+    $("edit-number-reading-style").options[0].textContent = `制作の設定に従う（${job.config.number_reading_style === "kanji" ? "漢数字" : "ひらがな"}）`;
     $("edit-convert-numbers").options[0].textContent = `制作の設定に従う（${job.config.convert_numbers !== false ? "変換する" : "変換しない"}）`;
     $("edit-control").value = draft.control; $("edit-pause").value = draft.pause_before_sec;
     $("save-status").textContent = local ? (local.revision === seg.revision ? "未保存（ブラウザに保持）" : "競合：入力を保持しています。再読み込み前にコピーしてください") : "保存済み";
@@ -162,7 +165,7 @@
         b.onclick = () => { selectedId = seg.id; renderedId = null; render(job); };
         row.append(c,b); panel.append(row);
       }
-      const draftChanged = seg.accepted && ["text","reading","control","pause_before_sec","convert_numbers"].some(key=>(seg.draft[key] ?? null) !== (accepted(seg)?.[key] ?? null));
+      const draftChanged = seg.accepted && ["text","reading","control","pause_before_sec","convert_numbers","number_reading_style"].some(key=>(seg.draft[key] ?? null) !== (accepted(seg)?.[key] ?? null));
       const review = draftChanged || seg.versions.some(v => v.id !== seg.accepted && !seg.history.includes(v.id)) || accepted(seg)?.evaluation?.awkward || !!accepted(seg)?.content_check?.warnings?.length || !!seg.error;
       row.hidden = filter === "pending" ? !!seg.accepted : filter === "ready" ? !seg.accepted : filter === "review" ? !review : false;
       row.classList.toggle("active",seg.id === selectedId);
@@ -230,7 +233,7 @@
     if(seg) {
       $("segment-title").textContent = `${seg.id} の編集`;
       $("original-text").textContent = `元の本文：${seg.original_text}`;
-      const editing = ["edit-text","edit-reading","edit-control","edit-pause","edit-convert-numbers"].includes(document.activeElement?.id);
+      const editing = ["edit-text","edit-reading","edit-control","edit-pause","edit-convert-numbers","edit-number-reading-style"].includes(document.activeElement?.id);
       if(renderedId !== `${job.id}/${seg.id}/${seg.revision}` && !editing) fillEditor(seg);
       const local=readLocal(draftKey(job.id,seg.id));
       $("resolve-edit").classList.toggle("hidden",!local || local.revision===seg.revision || (local.base && JSON.stringify(local.base)===JSON.stringify(seg.draft)));
