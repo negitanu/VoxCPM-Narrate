@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import queue
+import shutil
 import sqlite3
 import threading
 import traceback
@@ -60,6 +61,7 @@ class JobManager:
         self._lock = threading.RLock()
         self._queue = queue.Queue()
         self._worker = None
+        self._running_id = None
         self._db = sqlite3.connect(self.root / "productions.sqlite3", check_same_thread=False)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=FULL")
@@ -112,19 +114,69 @@ class JobManager:
                 )
             return copy.deepcopy(snapshot)
 
-    def get(self, job_id: str) -> dict:
+    def get(self, job_id: str, *, include_deleted=False) -> dict:
         with self._lock:
             row = self._db.execute("SELECT body FROM jobs WHERE id=?", (job_id,)).fetchone()
         if not row:
             raise KeyError("制作が見つかりません")
-        return json.loads(row[0])
+        job = json.loads(row[0])
+        if job.get("deleted_at") and not include_deleted:
+            raise KeyError("制作はごみ箱にあります")
+        return job
 
-    def list(self) -> list[dict]:
+    def list(self, *, deleted=False) -> list[dict]:
         with self._lock:
             rows = self._db.execute("SELECT body FROM jobs").fetchall()
         return sorted(
-            (json.loads(row[0]) for row in rows), key=lambda job: job["updated_at"], reverse=True
+            (job for row in rows if bool((job := json.loads(row[0])).get("deleted_at")) == deleted),
+            key=lambda job: job["updated_at"], reverse=True
         )
+
+    def delete(self, job_id):
+        with self._lock:
+            job = self.get(job_id, include_deleted=True)
+            if job["status"] in ACTIVE or self._running_id == job_id:
+                raise Conflict("処理中の制作は削除できません。中断して完了を待ってください")
+            if not job.get("deleted_at"):
+                job["deleted_at"] = now()
+                self.save(job)
+
+    def restore(self, job_id):
+        with self._lock:
+            job = self.get(job_id, include_deleted=True)
+            if job.get("purging"):
+                raise Conflict("完全削除が開始された制作は復元できません。ごみ箱を空にする操作を再実行してください")
+            job.pop("deleted_at", None)
+            return self.save(job)
+
+    def empty_trash(self, expected_ids):
+        """Purge only the confirmed snapshot; retain a tombstone on I/O failure."""
+        with self._lock:
+            jobs = self.list(deleted=True)
+            if set(expected_ids) != {job["id"] for job in jobs}:
+                raise Conflict("ごみ箱の内容が変更されました。一覧を更新して確認し直してください")
+            for job in jobs:
+                if job["status"] in ACTIVE or job["id"] == self._running_id:
+                    raise Conflict("処理中の制作があるため完全削除できません")
+                if not job["id"].isalnum():
+                    raise ValueError("制作IDが不正です")
+            deleted, failed = [], []
+            for job in jobs:
+                # Persist before touching files so a crash cannot offer partial audio for restore.
+                job["purging"] = True
+                self.save(job)
+                path = self.root / job["id"]
+                try:
+                    if path.is_symlink():
+                        path.unlink()
+                    elif path.exists():
+                        shutil.rmtree(path)
+                    with self._db:
+                        self._db.execute("DELETE FROM jobs WHERE id=?", (job["id"],))
+                    deleted.append(job["id"])
+                except (OSError, sqlite3.Error):
+                    failed.append(job["id"])
+            return {"deleted_ids": deleted, "failed_ids": failed}
 
     def mutate(self, job_id: str, fn) -> dict:
         with self._lock:
@@ -216,6 +268,8 @@ class JobManager:
                 self._queue.task_done()
                 return
             job_id, target = item
+            with self._lock:
+                self._running_id = job_id
             try:
                 self.checkpoint(job_id)
                 self.update(job_id, status="running")
@@ -258,7 +312,9 @@ class JobManager:
                         if seg["status"] in {"running", "regenerating", "judging"}:
                             seg["status"] = "ready" if seg.get("accepted") else "pending"
 
-                self.mutate(job_id, settle)
+                with self._lock:
+                    self.mutate(job_id, settle)
+                    self._running_id = None
                 self._queue.task_done()
 
     def close(self):

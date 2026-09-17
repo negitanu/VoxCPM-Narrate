@@ -102,13 +102,22 @@ def generate_wav(
     seed: int | None,
     input_metadata: dict | None = None,
     output_language: str = "ja",
+    reference_transcript: str | None = None,
+    retry_badcase: bool = True,
 ):
     ensure_rich_tqdm()
     import numpy as np
 
     from voxcpm_narrate.text_input import prepare_input
 
-    prepared = prepare_input(text, control, normalize, language=output_language)
+    reference_transcript = (reference_transcript or "").strip() or None
+    if reference_transcript and not reference_audio:
+        raise ValueError("確認済みの文字起こしには参照音声が必要です")
+    # Continuation mode: the recording defines voice and style, and VoxCPM feeds
+    # ``prompt_text + target_text`` to the model. A parenthesised instruction would be
+    # spoken aloud as English there, so the target text must be the script alone.
+    prepared = prepare_input(text, control, normalize, language=output_language,
+                             voice_instruction=not reference_transcript)
     if input_metadata is not None:
         input_metadata.update(prepared)
         input_metadata["runtime"] = getattr(model, "narrate_provenance", None)
@@ -117,10 +126,15 @@ def generate_wav(
         "cfg_value": cfg_value,
         "inference_timesteps": inference_timesteps,
         "normalize": False,
-        "retry_badcase": True,
+        "retry_badcase": retry_badcase,
     }
     if reference_audio:
         kwargs["reference_wav_path"] = reference_audio
+    if reference_transcript:
+        kwargs.update(prompt_wav_path=reference_audio, prompt_text=reference_transcript)
+    if input_metadata is not None:
+        input_metadata["reference_transcript"] = reference_transcript or None
+        input_metadata["conditioning_mode"] = "continuation" if reference_transcript else "voice_reference" if reference_audio else "voice_design"
     if seed is not None:
         kwargs["seed"] = seed
 

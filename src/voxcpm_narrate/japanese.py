@@ -1,6 +1,7 @@
 """Conservative Japanese number readings, before multilingual TTS inference."""
 
 import re
+from datetime import date
 import unicodedata
 
 DEFAULT_CONTROL = "日本語、明瞭な声、自然な抑揚、会話に近いテンポ"
@@ -52,15 +53,26 @@ def number_reading(value: str) -> str:
 def japanese_numbers(text: str) -> str:
     # Normalize only numeric width, leaving user readings and punctuation intact.
     text = re.sub(r"[０-９％．，]", lambda m: unicodedata.normalize("NFKC", m[0]), text)
+    # Only unambiguous, valid year/month/day dates; leave IDs and versions alone.
+    def calendar_date(match):
+        year, month, day = int(match[1]), int(match[3]), int(match[4])
+        try:
+            date(year, month, day)
+        except ValueError:
+            return match[0]
+        return f'{year}年{month}月{day}日'
+    text = re.sub(r'(?<![A-Za-z0-9_./-])(\d{4})([/-])(\d{1,2})\2(\d{1,2})(?![A-Za-z0-9_./-])',
+                  calendar_date, text)
+    text = re.sub(r"(?<![\d.])(\d{1,4})年", lambda m: integer_reading(m[1]) + "ねん", text)
     months = {4: "しがつ", 7: "しちがつ", 9: "くがつ"}
     days = {1: "ついたち", 2: "ふつか", 3: "みっか", 4: "よっか", 5: "いつか",
             6: "むいか", 7: "なのか", 8: "ようか", 9: "ここのか", 10: "とおか",
             14: "じゅうよっか", 20: "はつか", 24: "にじゅうよっか"}
     text = re.sub(r"(?<![\d.])(\d{1,2})月", lambda m: months.get(int(m[1]),
-                  integer_reading(m[1]) + "がつ") if 1 <= int(m[1]) <= 12 else m[0], text)
+                  integer_reading(str(int(m[1]))) + "がつ") if 1 <= int(m[1]) <= 12 else m[0], text)
     # 日間 is a duration, not the first day of a month.
     text = re.sub(r"(?<![\d.])(\d{1,2})日(?!間)", lambda m: days.get(int(m[1]),
-                  integer_reading(m[1]) + "にち") if 1 <= int(m[1]) <= 31 else m[0], text)
+                  integer_reading(str(int(m[1]))) + "にち") if 1 <= int(m[1]) <= 31 else m[0], text)
     text = re.sub(r"(?<![\d.])(\d{1,2})時", lambda m: {4: "よじ", 7: "しちじ", 9: "くじ"}.get(
         int(m[1]), integer_reading(m[1]) + "じ"), text)
     def minutes(match):

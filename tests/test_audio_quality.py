@@ -43,6 +43,10 @@ class InputTests(unittest.TestCase):
         self.assertEqual(japanese_numbers("12,800円、１０％、3時30分、4月1日。"),
                          "いちまんにせんはっぴゃくえん、じゅうパーセント、さんじさんじゅっぷん、しがつついたち。")
         self.assertEqual(japanese_numbers("VoxCPM2 v1.23"), "VoxCPM2 v1.23")
+        for text in ('2026年08月26日', '2026/08/26', '2026-08-26'):
+            self.assertEqual(japanese_numbers(text), 'にせんにじゅうろくねんはちがつにじゅうろくにち')
+        self.assertEqual(japanese_numbers('4月1日、7月20日、9月24日'),
+                         'しがつついたち、しちがつはつか、くがつにじゅうよっか')
         self.assertEqual(japanese_numbers("8分、14分、100分"), "はっぷん、じゅうよんぷん、ひゃく分")
 
     def test_legacy_default_uses_supported_expressive_japanese_voice_instruction(self):

@@ -6,17 +6,50 @@ from unittest.mock import Mock, patch
 import numpy as np
 import soundfile as sf
 
-from voxcpm_narrate.harness.content_gate import inspect_audio, local_error, normalize
+from voxcpm_narrate.harness.content_gate import (
+    GATE_VERSION, inspect_audio, inspection_ranges, local_error, normalize, phonetic,
+)
 from voxcpm_narrate.web.jobs import JobManager
 from voxcpm_narrate.web.service import ProductionService
 from voxcpm_narrate.web.app import Config
 
 
 class ContentTests(unittest.TestCase):
+    def test_short_tail_is_merged_and_short_clips_need_one_asr_call(self):
+        for seconds in (6.04, 6.167, 8):
+            self.assertEqual(inspection_ranges(round(seconds * 16000)),
+                             [(0, round(seconds * 16000))])
+        self.assertEqual(inspection_ranges(13 * 16000),
+                         [(0, 208000), (0, 96000), (96000, 208000)])
+
+    def test_date_and_loanword_readings_match_despite_language_tag(self):
+        source = '2026年8月26日、デジタルの説明です。'
+        reading = 'にせんにじゅうろくねんはちがつにじゅうろくにち、でじたるのせつめいです。'
+        self.assertEqual(phonetic(source), phonetic(reading))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'clip.wav'
+            sf.write(path, np.ones(16000 * 6) * .1, 16000)
+            asr = Mock(recognize=Mock(return_value='<|en|>' + reading))
+            report = inspect_audio(path, [source], asr)
+            self.assertTrue(report['passed'], report)
+            self.assertEqual(report['windows'][0]['reading_error'], 0)
+            self.assertTrue(report['warnings'])
+            asr.recognize.assert_called_once()
+
+    def test_numeric_disagreement_is_visible_without_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'clip.wav'
+            sf.write(path, np.ones(16000) * .1, 16000)
+            source = '開催日は2026年8月26日から27日までです。'
+            asr = Mock(recognize=Mock(return_value='<|ja|>' + source.replace('8月', '4月')))
+            report = inspect_audio(path, [source], asr)
+            self.assertTrue(report['passed'], report)
+            self.assertTrue(any('日付・数値' in w for w in report['warnings']))
+
     def test_window_finds_hallucination_hidden_by_full_asr(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'clip.wav'
-            sf.write(path, np.ones(16000 * 13) * .1, 16000)
+            sf.write(path, np.ones(16000 * 19) * .1, 16000)
             asr = Mock()
             asr.recognize.side_effect = [
                 '<|ja|>今回は説明します。', '<|ja|>今回は',
@@ -37,7 +70,7 @@ class ContentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'clip.wav'
             sf.write(path, np.ones(16000) * .1, 16000)
-            for raw in ['<|zh|>説明します', '']:
+            for raw in ['<|zh|>今天天气很好我们去公园', '']:
                 self.assertFalse(inspect_audio(path, ['説明します'],
                                               Mock(recognize=Mock(return_value=raw)))['passed'])
 
@@ -68,7 +101,7 @@ class PublishingTests(unittest.TestCase):
         self.service.model = Mock(return_value=model)
         self.generate = patch('voxcpm_narrate.web.service.generate_wav',
                               return_value=np.ones(16000, dtype='float32') * .1)
-        self.generate.start()
+        self.generate_mock = self.generate.start()
         self.job = self.service.create('test', '説明します。', 'plain', Config().model_dump())
         self.jid = self.job['id']
         self.sid = self.job['segments'][0]['id']
@@ -79,7 +112,7 @@ class PublishingTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def result(self, passed):
-        return dict(version='content-v1', passed=passed, reasons=[] if passed else ['不一致'], windows=[])
+        return dict(version=GATE_VERSION, passed=passed, reasons=[] if passed else ['不一致'], windows=[])
 
     def test_retry_then_cache_on_adopt_and_export(self):
         with patch('voxcpm_narrate.web.service.inspect_audio',
@@ -97,7 +130,10 @@ class PublishingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.service.generate(self.jid)
             job = self.manager.get(self.jid)
-            self.assertEqual(check.call_count, 4)
+            self.assertEqual(check.call_count, 3)
+            self.assertEqual(self.generate_mock.call_count, 3)
+            self.assertTrue(all(call.kwargs['retry_badcase'] is False
+                                for call in self.generate_mock.call_args_list))
             self.assertIsNone(job['segments'][0]['accepted'])
             self.assertIsNone(job['export'])
             with self.assertRaises(ValueError):
@@ -140,3 +176,16 @@ class PublishingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.service.export_audio(self.jid)
             self.assertEqual(check.call_count, 1)
+
+    def test_legacy_pace_failure_does_not_block_or_retry(self):
+        self.manager.mutate(self.jid, lambda j: j['config'].update(pace_mode='fixed', target_mora_rate=7))
+        with patch('voxcpm_narrate.web.service.inspect_audio', side_effect=lambda *a: self.result(True)), \
+             patch('voxcpm_narrate.speech_rate.adjust_rate', side_effect=lambda wav, *a: (wav, {
+                 'passed': False, 'reason': '話速が目標から大きく外れています'})):
+            self.service.generate(self.jid)
+        seg = self.manager.get(self.jid)['segments'][0]
+        self.assertEqual(len(seg['versions']), 1)
+        self.assertIsNotNone(seg['accepted'])
+        self.assertIn('話速', seg['versions'][0]['content_check']['warnings'][0])
+        path = self.service.audio_path(self.jid, self.sid, seg['versions'][0]['id'])
+        self.assertTrue(path.with_suffix('.raw.wav').is_file())

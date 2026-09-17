@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Literal
@@ -54,6 +55,7 @@ class Validated(BaseModel):
 
 
 class Config(Validated):
+    convert_numbers: bool = True
     device: Literal["auto", "cpu", "mps", "cuda"] = "auto"
     control: str = Field(default="日本語、明瞭な声、自然な抑揚、会話に近いテンポ", max_length=1000)
     max_chars: int = Field(default=120, ge=10, le=500)
@@ -61,6 +63,8 @@ class Config(Validated):
     timesteps: int = Field(default=10, ge=1, le=100)
     seed: int = Field(default=42, ge=0, le=2**31 - 1)
     model_id: str = Field(default="openbmb/VoxCPM2", min_length=1, max_length=200)
+    pace_mode: Literal["off", "reference", "fixed"] = "off"
+    target_mora_rate: float = Field(default=7, ge=2, le=12)
     improve: bool = False
     improve_asr: bool = False
     improve_llm: bool = False
@@ -75,10 +79,16 @@ class PreviewBody(Validated):
 
 
 class Draft(Validated):
+    convert_numbers: bool | None = None
     text: str = Field(min_length=1, max_length=2000)
     reading: str = Field(default="", max_length=2000)
     control: str = Field(default="", max_length=1000)
     pause_before_sec: float = Field(default=0.18, ge=0, le=10)
+
+
+class RenameBody(Validated):
+    title: str = Field(min_length=1, max_length=150)
+    expected_title: str = Field(max_length=150)
 
 
 class EditBody(Validated):
@@ -119,6 +129,11 @@ class ReadingPreview(Operation):
     reading: str = Field(min_length=1, max_length=200)
     segment_id: str = Field(min_length=1, max_length=100)
     expected_revision: int = Field(ge=0)
+
+
+class EmptyTrashBody(Validated):
+    job_ids: list[str] = Field(max_length=10000)
+    confirmed: bool = False
 
 
 class ImportBody(Validated):
@@ -174,26 +189,62 @@ def models(x_api_key: str | None = Header(default=None)):
 
 @app.post("/api/preview")
 def preview(body: PreviewBody):
-    return {
-        "segments": parse_script(body.script, body.mode, body.config.max_chars, body.config.control)
-    }
+    from voxcpm_narrate.japanese import japanese_numbers
+    segments = parse_script(body.script, body.mode, body.config.max_chars, body.config.control)
+    for item in segments:
+        item['prepared_reading'] = japanese_numbers(item['text']) if body.config.convert_numbers else item['text']
+    return {"segments": segments}
 
 
 @app.get("/api/jobs")
-def list_jobs():
+def list_jobs(deleted: bool = False):
     return {
         "jobs": [
             dict(
                 id=j["id"],
                 title=j["title"],
+                purging=bool(j.get("purging")),
                 status=j["status"],
                 updated_at=j["updated_at"],
                 total=len(j["segments"]),
                 ready=sum(bool(s["accepted"]) for s in j["segments"]),
             )
-            for j in manager.list()
+            for j in manager.list(deleted=deleted)
         ]
     }
+
+
+@app.post("/api/reference-transcription")
+def transcribe_reference(reference: UploadFile = File(...)):
+    suffix = Path(reference.filename or "audio.wav").suffix.lower()
+    if suffix not in {".wav", ".ogg", ".mp3", ".flac", ".m4a", ".webm", ".mp4"}:
+        raise ValueError("対応する音声ファイルを選択してください")
+    with tempfile.TemporaryDirectory(prefix="narrate-reference-") as tmp:
+        source = Path(tmp) / ("upload" + suffix)
+        size = 0
+        with source.open("wb") as output:
+            while chunk := reference.file.read(1024 * 1024):
+                size += len(chunk)
+                if size > 100 * 1024 * 1024:
+                    raise ValueError("参照音声は100 MBまでです")
+                output.write(chunk)
+        try:
+            audio = prepare_reference_wav(source, Path(tmp) / "reference.wav")
+            import soundfile as sf
+            info = sf.info(audio)
+            if not 0 < info.duration <= 120:
+                raise ValueError("参照音声は120秒以内にしてください")
+            import numpy as np
+            wav, sr = sf.read(audio, dtype="float32")
+            if not np.isfinite(wav).all():
+                raise ValueError("音声に不正な値が含まれています")
+            if wav.ndim > 1:
+                sf.write(audio, wav.mean(axis=1), sr, subtype="FLOAT")
+            with service._content_lock:
+                text = service._content_asr.transcribe(audio)
+        except Exception as exc:
+            raise ValueError("文字起こしできませんでした。音声を確認するか手動で入力してください") from exc
+    return {"text": text}
 
 
 @app.post("/api/jobs")
@@ -203,14 +254,23 @@ def create_job(
     mode: Literal["ssml", "markdown", "plain", "lines"] = Form("plain"),
     config: str = Form("{}"),
     reference: UploadFile | None = File(None),
+    reference_script: str = Form("", max_length=2000),
+    reference_transcript: str = Form("", max_length=2000),
+    transcript_confirmed: bool = Form(False),
 ):
+    if reference_transcript.strip() and (reference is None or not transcript_confirmed):
+        raise ValueError("参照音声の文字起こしを確認してください")
+    if reference_script.strip() and reference is None:
+        raise ValueError("読み上げスクリプトには参照音声が必要です")
     cfg = Config.model_validate_json(config).model_dump()
+    if cfg["pace_mode"] == "reference" and not reference_transcript.strip():
+        raise ValueError("参照音声の話速を使うには、録音と確認済みの文字起こしが必要です")
     parsed = parse_script(script, mode, cfg["max_chars"], cfg["control"])
     job = service.create(title.strip() or "新しいナレーション", script, mode, cfg, parsed)
     if reference:
         suffix = Path(reference.filename or "source.wav").suffix.lower()
-        if suffix not in {".wav", ".ogg", ".mp3", ".flac", ".m4a"}:
-            raise ValueError("対応形式は WAV / OGG / MP3 / FLAC / M4A です")
+        if suffix not in {".wav", ".ogg", ".mp3", ".flac", ".m4a", ".webm", ".mp4"}:
+            raise ValueError("対応形式は WAV / OGG / MP3 / FLAC / M4A / WebM / MP4 です")
         path = manager.job_dir(job["id"]) / "uploads" / ("reference" + suffix)
         path.parent.mkdir(parents=True, exist_ok=True)
         size = 0
@@ -243,7 +303,12 @@ def create_job(
 
                 write_wav(prepared, wav.mean(axis=1), sr)
                 warnings.append("参照音声をモノラルに変換しました")
-            cfg.update(reference_audio="reference.wav", reference_sha256=file_hash(prepared))
+            cfg.update(reference_audio="reference.wav", reference_sha256=file_hash(prepared),
+                       reference_script=reference_script.strip(),
+                       reference_transcript=reference_transcript.strip())
+            if cfg["pace_mode"] == "reference":
+                from voxcpm_narrate.speech_rate import reference_rate
+                cfg["target_mora_rate"] = reference_rate(prepared, reference_transcript.strip())
             job = manager.update(job["id"], config=cfg, reference_warnings=warnings)
         except Exception as exc:
             manager.update(
@@ -269,6 +334,20 @@ def public(job):
 @app.get("/api/jobs/{jid}")
 def get_job(jid: str):
     return public(manager.get(jid))
+
+
+@app.patch("/api/jobs/{jid}/title")
+def rename_job(jid: str, body: RenameBody):
+    title = body.title.strip()
+    if not title:
+        raise ValueError("制作名を入力してください")
+
+    def change(job):
+        if job["title"] != body.expected_title:
+            raise Conflict("制作名が別の操作で変更されました。最新の名前を確認してください")
+        job["title"] = title
+
+    return public(manager.mutate(jid, change))
 
 
 @app.patch("/api/jobs/{jid}/segments/{sid}")
@@ -361,6 +440,36 @@ def generate(jid: str, body: Operation):
     return public(job)
 
 
+@app.post("/api/jobs/{jid}/regenerate-all")
+def regenerate_all(jid: str, body: Operation):
+    def validate(job):
+        if body.segment_ids is not None:
+            raise ValueError("全て再生成ではセグメントの指定はできません")
+        job["regeneration_progress"] = {"current": 0, "total": len(job["segments"])}
+        if job["config"].get("reference_audio") and service._reference_audio(jid, job["config"]) is None:
+            raise ValueError("保存された参照音声が見つかりません")
+    return public(manager.submit(jid, "regenerate-all", service.regenerate_all,
+                                 request_id=body.request_id, validate=validate))
+
+
+@app.delete("/api/jobs/{jid}")
+def delete_job(jid: str):
+    manager.delete(jid)
+    return {"deleted": True}
+
+
+@app.post("/api/trash/empty")
+def empty_trash(body: EmptyTrashBody):
+    if not body.confirmed:
+        raise ValueError("完全削除の確認が必要です")
+    return manager.empty_trash(body.job_ids)
+
+
+@app.post("/api/jobs/{jid}/restore")
+def restore_job(jid: str):
+    return public(manager.restore(jid))
+
+
 @app.post("/api/jobs/{jid}/cancel")
 def cancel(jid: str):
     def change(job):
@@ -408,6 +517,20 @@ def adopt(jid: str, sid: str, body: SegmentOperation):
             validate=validate,
         )
     )
+
+
+@app.post("/api/jobs/{jid}/segments/{sid}/recheck")
+def recheck(jid: str, sid: str, body: SegmentOperation):
+    if not body.version_id:
+        raise ValueError("再検査する版を選択してください")
+
+    def validate(job):
+        validate_segment(sid, body)(job)
+        version(segment(job, sid), body.version_id)
+
+    return public(manager.submit(jid, "recheck",
+        lambda key: service.verify_content(key, sid, body.version_id),
+        request_id=body.request_id, validate=validate))
 
 
 @app.post("/api/jobs/{jid}/segments/{sid}/audio-judge")

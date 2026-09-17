@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from voxcpm_narrate.console import log_error
 from voxcpm_narrate.extract import split_into_segments
 from voxcpm_narrate.harness.judge import LlmJudge, _parse_judgement
+from voxcpm_narrate.harness.content_gate import GATE_VERSION
 from voxcpm_narrate.synthesize import prepare_reference_wav
 from voxcpm_narrate.web import app as web
 from voxcpm_narrate.web.jobs import Conflict, JobManager, safe_job_snapshot
@@ -39,7 +40,7 @@ class StudioTests(unittest.TestCase):
         self.service._model_key = ("openbmb/VoxCPM2", "auto")
         self.patchers = [
             patch("voxcpm_narrate.web.service.inspect_audio", return_value={
-                "version": "content-v1", "passed": True, "reasons": [], "windows": []}),
+                "version": GATE_VERSION, "passed": True, "reasons": [], "windows": []}),
             patch.object(web, "manager", self.manager),
             patch.object(web, "service", self.service),
             patch.object(web, "DEFAULT_OUT", Path(self.tmp.name)),
@@ -66,6 +67,284 @@ class StudioTests(unittest.TestCase):
         job = self.manager.get(jid)
         self.assertEqual(job["status"], "done", job)
         return job
+
+    def test_continuation_requires_confirmation(self):
+        wav = io.BytesIO()
+        sf.write(wav, np.ones(16000, dtype="float32") * .1, 16000, format="WAV")
+        data = {"script": "本文です。", "reference_transcript": "録音の内容です。"}
+        files = {"reference": ("recording.wav", wav.getvalue(), "audio/wav")}
+        rejected = self.client.post("/api/jobs", data=data, files=files)
+        self.assertEqual(rejected.status_code, 400)
+        data["transcript_confirmed"] = "true"
+        accepted = self.client.post("/api/jobs", data=data, files=files)
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        self.assertEqual(accepted.json()["config"]["reference_transcript"], "録音の内容です。")
+        self.service.generate(accepted.json()["id"])
+        job = self.manager.get(accepted.json()["id"])
+        self.assertEqual(job["segments"][0]["versions"][0]["conditioning_mode"], "continuation")
+
+    def test_number_reading_option_reaches_model_and_survives_adoption(self):
+        text = '開催日は2026年8月26日です。'
+        created = self.client.post('/api/jobs', data={'script': text,
+            'config': json.dumps({'convert_numbers': False})}).json()
+        job = self.run_all(created['id'])
+        seg = job['segments'][0]
+        self.assertEqual(seg['versions'][0]['prepared_reading'], text)
+        draft = {**seg['draft'], 'convert_numbers': True}
+        self.service.edit(job['id'], seg['id'], seg['revision'], draft)
+        self.service.regenerate(job['id'], seg['id'])
+        candidate = self.manager.get(job['id'])['segments'][0]['versions'][-1]
+        self.assertEqual(candidate['prepared_reading'],
+                         '開催日はにせんにじゅうろくねんはちがつにじゅうろくにちです。')
+        self.service.adopt(job['id'], seg['id'], candidate['id'])
+        self.assertTrue(self.manager.get(job['id'])['segments'][0]['draft']['convert_numbers'])
+
+    def test_number_reading_preview_toggle_and_calendar_formats(self):
+        text = '開催日は2026/08/26です。'
+        for enabled in (True, False):
+            response = self.client.post('/api/preview', json={'script': text,
+                'config': {'convert_numbers': enabled}})
+            self.assertEqual(response.status_code, 200, response.text)
+            reading = response.json()['segments'][0]['prepared_reading']
+            self.assertEqual(reading, '開催日はにせんにじゅうろくねんはちがつにじゅうろくにちです。'
+                             if enabled else text)
+
+    def test_recheck_legacy_candidate_without_generating_or_changing_audio(self):
+        job = self.run_all(self.create('説明します。')['id'])
+        seg = job['segments'][0]
+        vid = seg['versions'][0]['id']
+        path = self.service.audio_path(job['id'], seg['id'], vid)
+        original = path.read_bytes()
+        self.manager.mutate(job['id'], lambda j: j['segments'][0]['versions'][0].update(
+            content_check={'version': 'content-v1', 'passed': False, 'reasons': ['話速']}))
+        url = f"/api/jobs/{job['id']}/segments/{seg['id']}/recheck"
+        with patch.object(self.service, '_generate') as generate:
+            response = self.client.post(url, json={'version_id': vid,
+                'expected_revision': seg['revision'], 'request_id': 'recheck'})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.manager._queue.join()
+            generate.assert_not_called()
+        checked = self.manager.get(job['id'])['segments'][0]['versions'][0]['content_check']
+        self.assertEqual(checked['version'], GATE_VERSION)
+        self.assertTrue(checked['passed'])
+        self.assertEqual(path.read_bytes(), original)
+        rejected = self.client.post(url, json={'version_id': vid,
+            'expected_revision': seg['revision'] + 1, 'request_id': 'stale'})
+        self.assertEqual(rejected.status_code, 409)
+
+    def test_reference_pace_is_calculated_once_and_saved(self):
+        wav = io.BytesIO()
+        sf.write(wav, np.ones(16000 * 4, dtype="float32") * .1, 16000, format="WAV")
+        result = self.client.post("/api/jobs", data={"script": "本文です。",
+            "config": json.dumps({"pace_mode": "reference"}),
+            "reference_transcript": "あいうえおあいうえおあいうえおあいうえお",
+            "transcript_confirmed": "true"},
+            files={"reference": ("recording.wav", wav.getvalue(), "audio/wav")})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertAlmostEqual(result.json()["config"]["target_mora_rate"], 5)
+
+    def test_reference_pace_requires_transcript(self):
+        result = self.client.post("/api/jobs", data={"script": "本文です。",
+            "config": json.dumps({"pace_mode": "reference"})})
+        self.assertEqual(result.status_code, 400)
+
+    def test_reference_transcription_does_not_create_job(self):
+        wav = io.BytesIO()
+        sf.write(wav, np.ones(16000, dtype="float32") * .1, 16000, format="WAV")
+        with patch.object(self.service._content_asr, "transcribe", return_value="実際の発話"):
+            result = self.client.post("/api/reference-transcription", files={
+                "reference": ("recording.wav", wav.getvalue(), "audio/wav")})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["text"], "実際の発話")
+        self.assertEqual(self.manager.list(), [])
+
+    def test_recorded_reference_keeps_script(self):
+        wav = io.BytesIO()
+        sf.write(wav, np.ones(16000, dtype="float32") * .1, 16000, format="WAV")
+        result = self.client.post("/api/jobs", data={"script": "制作する台本です。",
+            "reference_script": "録音時の例文です。"},
+            files={"reference": ("recording.wav", wav.getvalue(), "audio/wav")})
+        self.assertEqual(result.status_code, 200, result.text)
+        job = self.manager.get(result.json()["id"])
+        self.assertEqual(job["config"]["reference_script"], "録音時の例文です。")
+        self.assertEqual(job["segments"][0]["draft"]["text"], "制作する台本です。")
+        self.assertTrue((self.manager.job_dir(job["id"]) / "reference.wav").is_file())
+
+    def test_reference_script_requires_audio(self):
+        result = self.client.post("/api/jobs", data={"script": "本文です。",
+                                                     "reference_script": "録音の例文"})
+        self.assertEqual(result.status_code, 400)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg required")
+    def test_browser_webm_reference_is_converted(self):
+        import subprocess
+        path = Path(self.tmp.name) / "recording.webm"
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                        "sine=frequency=440:duration=1", "-c:a", "libopus", str(path)], check=True)
+        result = self.client.post("/api/jobs", data={"script": "本文です。"},
+                                 files={"reference": (path.name, path.read_bytes(), "audio/webm")})
+        self.assertEqual(result.status_code, 200, result.text)
+        prepared = self.manager.job_dir(result.json()["id"]) / "reference.wav"
+        self.assertEqual(sf.info(prepared).channels, 1)
+        self.assertEqual(sf.info(prepared).samplerate, 16000)
+
+    def test_regenerate_all_atomically_adopts_and_keeps_history(self):
+        job = self.run_all(self.create()["id"])
+        before = [s["accepted"] for s in job["segments"]]
+        url = f"/api/jobs/{job['id']}/regenerate-all"
+        response = self.client.post(url, json={"request_id": "all-again"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.manager._queue.join()
+        after = self.manager.get(job["id"])
+        self.assertEqual(after["status"], "done", after)
+        for seg, prior in zip(after["segments"], before):
+            self.assertNotEqual(seg["accepted"], prior)
+            self.assertIn(prior, seg["history"])
+            self.assertEqual(len(seg["versions"]), 2)
+        self.assertNotEqual(after["export"]["id"], job["export"]["id"])
+        self.client.post(url, json={"request_id": "all-again"})
+        self.manager._queue.join()
+        self.assertEqual(len(self.manager.get(job["id"])["segments"][0]["versions"]), 2)
+
+    def test_regenerate_all_failure_does_not_partially_adopt(self):
+        job = self.run_all(self.create()["id"])
+        original = self.service._checked_generate
+        calls = []
+        def generate(jid, sid, **kwargs):
+            calls.append(sid)
+            if len(calls) == 2:
+                raise ValueError("failed second segment")
+            return original(jid, sid, **kwargs)
+        with patch.object(self.service, "_checked_generate", side_effect=generate):
+            with self.assertRaises(ValueError):
+                self.service.regenerate_all(job["id"])
+        after = self.manager.get(job["id"])
+        self.assertEqual([s["accepted"] for s in after["segments"]],
+                         [s["accepted"] for s in job["segments"]])
+        self.assertEqual(after["export"], job["export"])
+        self.assertEqual(len(after["segments"][0]["versions"]), 2)
+
+    def test_regenerate_all_cancel_does_not_adopt(self):
+        from voxcpm_narrate.web.jobs import Cancelled
+        job = self.run_all(self.create()["id"])
+        original = self.service._checked_generate
+        def generate(jid, sid, **kwargs):
+            result = original(jid, sid, **kwargs)
+            self.manager.update(jid, cancel_requested=True)
+            return result
+        with patch.object(self.service, "_checked_generate", side_effect=generate):
+            with self.assertRaises(Cancelled):
+                self.service.regenerate_all(job["id"])
+        self.assertEqual(self.manager.get(job["id"])["export"], job["export"])
+
+    def test_trash_hides_audio_and_can_restore_after_restart(self):
+        job = self.run_all(self.create("本文です。")["id"])
+        jid = job["id"]
+        sid = job["segments"][0]["id"]
+        response = self.client.delete(f"/api/jobs/{jid}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.client.get("/api/jobs").json()["jobs"], [])
+        self.assertEqual(self.client.get("/api/jobs?deleted=true").json()["jobs"][0]["id"], jid)
+        self.assertEqual(self.client.get(f"/api/jobs/{jid}/segments/{sid}").status_code, 404)
+        restored_manager = JobManager(Path(self.tmp.name))
+        try:
+            self.assertEqual(restored_manager.list(), [])
+            self.assertEqual(restored_manager.list(deleted=True)[0]["id"], jid)
+        finally:
+            restored_manager.close()
+        self.assertEqual(self.client.post(f"/api/jobs/{jid}/restore").status_code, 200)
+        self.assertEqual(self.client.get(f"/api/jobs/{jid}/segments/{sid}").status_code, 200)
+        self.assertEqual(self.manager.get(jid)["export"], job["export"])
+
+    def test_trash_rejects_processing_jobs(self):
+        job = self.create()
+        self.manager.update(job["id"], status="queued")
+        self.assertEqual(self.client.delete(f"/api/jobs/{job['id']}").status_code, 409)
+        self.manager.update(job["id"], status="done")
+        self.manager._running_id = job["id"]
+        self.assertEqual(self.client.delete(f"/api/jobs/{job['id']}").status_code, 409)
+        self.manager._running_id = None
+
+    def test_empty_trash_deletes_files_but_keeps_live_jobs_and_dictionary(self):
+        removed = self.create("削除する制作です。")
+        kept = self.create("保持する制作です。")
+        folder = self.manager.job_dir(removed["id"])
+        (folder / "audio.wav").write_bytes(b"test audio")
+        self.manager.learn_reading(kept["id"], "用語", "ヨウゴ", shared=True, expected_revision=0)
+        self.manager.delete(removed["id"])
+        result = self.client.post("/api/trash/empty", json={
+            "job_ids": [removed["id"]], "confirmed": True})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["deleted_ids"], [removed["id"]])
+        self.assertFalse(folder.exists())
+        self.assertEqual(self.manager.list(deleted=True), [])
+        self.assertEqual(self.manager.get(kept["id"])["id"], kept["id"])
+        self.assertEqual(self.manager.lexicon()["entries"]["用語"], "ヨウゴ")
+        self.assertEqual(self.client.post(f"/api/jobs/{removed['id']}/restore").status_code, 404)
+
+    def test_empty_trash_requires_confirmation_and_matching_snapshot(self):
+        first = self.create()
+        self.manager.delete(first["id"])
+        result = self.client.post("/api/trash/empty", json={"job_ids": [first["id"]]})
+        self.assertEqual(result.status_code, 400)
+        second = self.create()
+        self.manager.delete(second["id"])
+        stale = self.client.post("/api/trash/empty", json={"job_ids": [first["id"]], "confirmed": True})
+        self.assertEqual(stale.status_code, 409)
+        self.assertTrue(self.manager.job_dir(first["id"]).exists())
+        self.assertEqual(len(self.manager.list(deleted=True)), 2)
+
+    def test_empty_trash_failure_can_retry_but_cannot_restore_partial_files(self):
+        job = self.create()
+        self.manager.delete(job["id"])
+        with patch("voxcpm_narrate.web.jobs.shutil.rmtree", side_effect=PermissionError("test")):
+            result = self.manager.empty_trash([job["id"]])
+        self.assertEqual(result["failed_ids"], [job["id"]])
+        self.assertEqual(self.client.post(f"/api/jobs/{job['id']}/restore").status_code, 409)
+        self.assertTrue(self.manager.get(job["id"], include_deleted=True)["purging"])
+        result = self.manager.empty_trash([job["id"]])
+        self.assertEqual(result["deleted_ids"], [job["id"]])
+
+    def test_empty_trash_unlinks_symlink_without_touching_target(self):
+        job = self.create()
+        folder = self.manager.job_dir(job["id"])
+        folder.rmdir()
+        target = Path(self.tmp.name) / "unrelated"
+        target.mkdir()
+        (target / "keep.txt").write_text("keep")
+        folder.symlink_to(target, target_is_directory=True)
+        self.manager.delete(job["id"])
+        self.manager.empty_trash([job["id"]])
+        self.assertEqual((target / "keep.txt").read_text(), "keep")
+        self.assertFalse(folder.is_symlink())
+
+    def test_rename_preserves_audio_and_updates_library(self):
+        job = self.run_all(self.create("本文です。")["id"])
+        result = self.client.patch(f"/api/jobs/{job['id']}/title", json={
+            "title": "  改訂版ナレーション  ", "expected_title": job["title"]})
+        self.assertEqual(result.status_code, 200, result.text)
+        changed = result.json()
+        self.assertEqual(changed["title"], "改訂版ナレーション")
+        self.assertEqual(changed["segments"], job["segments"])
+        self.assertEqual(changed["export"], job["export"])
+        self.assertEqual(self.client.get("/api/jobs").json()["jobs"][0]["title"], "改訂版ナレーション")
+        stale = self.client.patch(f"/api/jobs/{job['id']}/title", json={
+            "title": "古い編集", "expected_title": job["title"]})
+        self.assertEqual(stale.status_code, 409)
+
+    def test_rename_validation_and_processing(self):
+        job = self.create()
+        url = f"/api/jobs/{job['id']}/title"
+        for title in ["   ", "x" * 151]:
+            self.assertIn(self.client.patch(url, json={"title": title,
+                "expected_title": job["title"]}).status_code, [400, 422])
+        self.manager.update(job["id"], status="running")
+        result = self.client.patch(url, json={"title": "処理中の新しい名前", "expected_title": job["title"]})
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json()["status"], "running")
+        self.manager.update(job["id"], status="done")
+        self.manager.delete(job["id"])
+        self.assertEqual(self.client.patch(url, json={"title": "名前", "expected_title": "処理中の新しい名前"}).status_code, 404)
 
     def test_error_logging_does_not_raise(self):
         log_error("expected test error")

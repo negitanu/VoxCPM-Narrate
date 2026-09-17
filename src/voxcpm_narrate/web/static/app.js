@@ -4,8 +4,8 @@
   const activeStates = new Set(["queued", "running", "improving"]);
   const labels = {draft:"下書き",queued:"待機中",running:"処理中",improving:"評価中",done:"保存済み",interrupted:"中断",error:"エラー"};
   let job = null, selectedId = null, renderedId = null, polling = false, sequence = [], librarySignature = "";
-  let settings = {}, previewUrl = null, requestBusy = false;
-  let lexiconRevision = 0;
+  let settings = {}, requestBusy = false;
+  let lexiconRevision = 0, renameBase = "";
   const dictionaryText = entries => Object.entries(entries).map(([k,v]) => `${k}=${v}`).join("\n");
   const checked = new Set();
   const draftKey = (jid, sid) => `voxcpm.edit.${jid}.${sid}`;
@@ -34,23 +34,62 @@
   const audioUrl = (sid, vid) => `/api/jobs/${job.id}/segments/${encodeURIComponent(sid)}?version_id=${encodeURIComponent(vid)}`;
   const request = () => ({request_id:crypto.randomUUID(),api_key:$("api-key").value.trim()});
   const config = () => ({device:$("device").value,control:$("control").value,max_chars:+$("max-chars").value,
+    convert_numbers:$("convert-numbers").checked,
+    pace_mode:$("pace-mode").value,target_mora_rate:+$("target-mora-rate").value,
     cfg_value:+$("cfg").value,timesteps:+$("timesteps").value,seed:+$("seed").value,
     improve:$("improve").checked,improve_asr:$("asr").checked,improve_llm:$("llm").checked,
     improve_rounds:+$("rounds").value,llm_model:$("llm-model").value || settings.default_model});
 
   async function refreshLibrary() {
-    const data = await api("/api/jobs");
-    const signature = JSON.stringify(data.jobs) + (job?.id || "");
+    const trash = $("show-trash").checked;
+    const data = await api(`/api/jobs?deleted=${trash}`);
+    $("empty-trash").classList.toggle("hidden", !trash);
+    $("empty-trash").disabled = !data.jobs.length;
+    const signature = JSON.stringify(data.jobs) + (job?.id || "") + trash;
     if(signature === librarySignature) return;
     librarySignature = signature;
     $("library").replaceChildren(...data.jobs.map(j => {
       const b = document.createElement("button"); b.className = "library-item" + (job?.id === j.id ? " active" : "");
       const title = document.createElement("span"); title.textContent = j.title;
       const meta = document.createElement("small"); meta.textContent = `${labels[j.status] || j.status} · ${j.ready}/${j.total}`;
-      b.append(title,meta); b.onclick = () => action(() => openJob(j.id)); return b;
+      b.append(title,meta); b.onclick = () => action(() => openJob(j.id)); b.disabled = trash;
+      const row = document.createElement("div"); row.className = "library-row";
+      const remove = document.createElement("button"); remove.className = "library-delete";
+      remove.textContent = trash ? "復元" : "削除";
+      remove.setAttribute("aria-label", `${j.title}を${trash ? "復元" : "削除"}`);
+      remove.disabled = activeStates.has(j.status) || !!j.purging;
+      if (j.purging) meta.textContent = "完全削除の途中・再実行してください";
+      remove.onclick = () => action(async () => {
+        if (trash) { await post(`/api/jobs/${j.id}/restore`); }
+        else {
+          if (!confirm(`「${j.title}」をごみ箱へ移動しますか？音声は保持され、復元できます。`)) return;
+          await api(`/api/jobs/${j.id}`, {method:"DELETE"});
+          if (job?.id === j.id) { $("new-job").click(); $("audio").removeAttribute("src"); }
+        }
+        librarySignature = ""; await refreshLibrary();
+        notice(trash ? "制作を復元しました。ごみ箱表示を解除すると開けます。" : "ごみ箱へ移動しました。ごみ箱から復元できます。");
+      });
+      row.append(b,remove); return row;
     }));
   }
+  $("empty-trash").onclick = () => action(async () => {
+    const {jobs} = await api("/api/jobs?deleted=true");
+    if (!jobs.length) { await refreshLibrary(); return; }
+    if (!confirm(`ごみ箱の${jobs.length}件を完全に削除しますか？台本・参照音声・生成音声・書き出しファイルが削除され、復元できません。`)) return;
+    try {
+      const result = await post("/api/trash/empty", {job_ids:jobs.map(j=>j.id),confirmed:true});
+      for (const jid of result.deleted_ids) {
+        for (const key of Object.keys(localStorage)) {
+          if (key.startsWith(`voxcpm.edit.${jid}.`) || key.startsWith(`voxcpm.reading.${jid}.`)) localStorage.removeItem(key);
+        }
+      }
+      notice(`${result.deleted_ids.length}件を完全削除しました。` + (result.failed_ids.length ? `${result.failed_ids.length}件は削除できませんでした。ファイルへのアクセス権を確認して再実行してください。` : ""), !!result.failed_ids.length);
+    } finally { librarySignature = ""; await refreshLibrary(); }
+  });
+  $("show-trash").onchange = () => action(refreshLibrary);
   async function openJob(id) {
+    window.referenceRecorder.cancel();
+    closeRename();
     const data = await api(`/api/jobs/${encodeURIComponent(id)}`);
     sequence = []; $("audio").pause(); checked.clear(); selectedId = data.segments[0]?.id; renderedId = null;
     job = data; history.replaceState(null,"",`?job=${id}`);
@@ -59,8 +98,31 @@
     $("pronunciation-candidates").replaceChildren();
     render(data); await refreshLibrary(); await loadPronunciations();
   }
+  function closeRename() {
+    $("rename-form").classList.add("hidden");
+    $("rename-job").setAttribute("aria-expanded", "false");
+  }
+  $("rename-job").onclick = () => {
+    renameBase = job.title;
+    $("rename-title").value = job.title;
+    $("rename-form").classList.remove("hidden");
+    $("rename-job").setAttribute("aria-expanded", "true");
+    $("rename-title").focus(); $("rename-title").select();
+  };
+  $("cancel-rename").onclick = closeRename;
+  $("rename-form").onsubmit = event => {
+    event.preventDefault();
+    action(async () => {
+      const title = $("rename-title").value.trim();
+      if (!title) throw new Error("制作名を入力してください。");
+      const jid = job.id;
+      const data = await api(`/api/jobs/${jid}/title`, {method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({title,expected_title:renameBase})});
+      if (job?.id === jid) { render(data); closeRename(); }
+      await refreshLibrary(); notice("制作名を変更しました。");
+    });
+  };
   function editValue() {
-    return {text:$("edit-text").value,reading:$("edit-reading").value,control:$("edit-control").value,pause_before_sec:+$("edit-pause").value};
+    return {text:$("edit-text").value,reading:$("edit-reading").value,control:$("edit-control").value,pause_before_sec:+$("edit-pause").value,convert_numbers:$("edit-convert-numbers").value === "" ? null : $("edit-convert-numbers").value === "true"};
   }
   function trackEdit() {
     const seg = current(); if(!seg) return;
@@ -68,7 +130,7 @@
     store(draftKey(job.id,seg.id), {draft:editValue(),revision:prior?.revision ?? seg.revision,base:prior?.base ?? seg.draft});
     $("save-status").textContent = "未保存（このブラウザに一時保存）";
   }
-  ["edit-text","edit-reading","edit-control","edit-pause"].forEach(id => $(id).addEventListener("input", trackEdit));
+  ["edit-text","edit-reading","edit-control","edit-pause","edit-convert-numbers"].forEach(id => $(id).addEventListener("input", trackEdit));
   async function saveEdit() {
     const seg = current(); if(!seg) return;
     const local = readLocal(draftKey(job.id,seg.id)); if(!local) return;
@@ -81,6 +143,8 @@
   function fillEditor(seg) {
     const local = readLocal(draftKey(job.id,seg.id)); const draft = local?.draft || seg.draft;
     $("edit-text").value = draft.text; $("edit-reading").value = draft.reading;
+    $("edit-convert-numbers").value = draft.convert_numbers == null ? "" : String(draft.convert_numbers);
+    $("edit-convert-numbers").options[0].textContent = `制作の設定に従う（${job.config.convert_numbers !== false ? "変換する" : "変換しない"}）`;
     $("edit-control").value = draft.control; $("edit-pause").value = draft.pause_before_sec;
     $("save-status").textContent = local ? (local.revision === seg.revision ? "未保存（ブラウザに保持）" : "競合：入力を保持しています。再読み込み前にコピーしてください") : "保存済み";
     $("resolve-edit").classList.toggle("hidden",!local || local.revision === seg.revision);
@@ -98,8 +162,8 @@
         b.onclick = () => { selectedId = seg.id; renderedId = null; render(job); };
         row.append(c,b); panel.append(row);
       }
-      const draftChanged = seg.accepted && ["text","reading","control","pause_before_sec"].some(key=>seg.draft[key] !== accepted(seg)?.[key]);
-      const review = draftChanged || seg.versions.some(v => v.id !== seg.accepted && !seg.history.includes(v.id)) || accepted(seg)?.evaluation?.awkward || !!seg.error;
+      const draftChanged = seg.accepted && ["text","reading","control","pause_before_sec","convert_numbers"].some(key=>(seg.draft[key] ?? null) !== (accepted(seg)?.[key] ?? null));
+      const review = draftChanged || seg.versions.some(v => v.id !== seg.accepted && !seg.history.includes(v.id)) || accepted(seg)?.evaluation?.awkward || !!accepted(seg)?.content_check?.warnings?.length || !!seg.error;
       row.hidden = filter === "pending" ? !!seg.accepted : filter === "ready" ? !seg.accepted : filter === "review" ? !review : false;
       row.classList.toggle("active",seg.id === selectedId);
       row.querySelector("input").checked = checked.has(seg.id);
@@ -119,7 +183,7 @@
       label.className = isAccepted ? "adopted" : "";
       const score = v.evaluation ? ` · 評価 ${v.evaluation.overall.toFixed(2)}${v.evaluation.awkward ? " 要確認" : ""}${v.evaluation.llm_reason && v.evaluation.llm_score == null ? "（LLM 未評価）" : ""}` : "";
       const gate = v.content_check;
-      const gateText = gate ? (gate.passed ? " · 音声検査 合格" : " · 音声検査 未合格") : " · 音声検査 未実施";
+      const gateText = gate ? (gate.passed ? (gate.warnings?.length ? " · 音声検査 合格・確認事項あり" : " · 音声検査 合格") : " · 音声検査 未合格") : " · 音声検査 未実施";
       label.textContent = `${isAccepted ? "採用中" : seg.history.includes(v.id) ? "以前の音声" : "候補"} · ${v.duration_sec.toFixed(1)}秒${score}${gateText}`;
       label.title = `${v.text}\n話し方: ${v.control}\n間: ${v.pause_before_sec}秒\n生成日時: ${v.created_at}`;
       const play = document.createElement("button"); play.textContent = "試聴"; play.onclick = () => playOne(seg.id,v.id);
@@ -131,21 +195,31 @@
       });
       const details=document.createElement("small");details.className="version-details";
       details.textContent=`${v.text} — 間 ${v.pause_before_sec}秒 / ${v.control || "話し方指定なし"}`;
+      if (v.prepared_reading) details.textContent += ` — 生成に使用した読み: ${v.prepared_reading}`;
+      if (v.speech_rate) details.textContent += ` — 話速: ${v.speech_rate.reason}（目標 ${v.speech_rate.target.toFixed(1)} モーラ/秒）`;
+      if (v.speech_rate?.applied) details.textContent += ` / ${v.speech_rate.before.toFixed(1)} → ${v.speech_rate.after.toFixed(1)} モーラ/秒（${v.speech_rate.factor.toFixed(2)}倍）`;
+      if (v.speech_rate?.estimated_terms?.length) details.textContent += `（読み推定: ${v.speech_rate.estimated_terms.join("、")}）`;
       if (gate && !gate.passed) details.textContent += " — " + gate.reasons.join(" / ");
-      row.append(label,play,adopt,details); return row;
+      if (gate?.warnings?.length) details.textContent += " — " + gate.warnings.join(" / ");
+      const recheck = document.createElement("button"); recheck.textContent = "音声を再検査";
+      recheck.disabled = !!busy();
+      recheck.onclick = () => action(async () => render(await post(`/api/jobs/${job.id}/segments/${seg.id}/recheck`, {...request(),expected_revision:seg.revision,version_id:v.id})));
+      row.append(label,play,adopt,recheck,details); return row;
     }));
   }
   function render(data) {
     if(job && job.id !== data.id) return;
     job = data;
     $("job-title").textContent = job.title; $("job-status").textContent = labels[job.status] || job.status;
-    $("progress-fill").style.width = `${job.percent}%`; $("progress").setAttribute("aria-valuenow",job.percent);
-    $("progress-text").textContent = `${job.current}/${job.total} 採用済み · ${job.error || job.message}`;
+    const regen = job.operation === "regenerate-all" ? job.regeneration_progress : null;
+    const percent = regen ? Math.round(100 * regen.current / Math.max(1,regen.total)) : job.percent;
+    $("progress-fill").style.width = `${percent}%`; $("progress").setAttribute("aria-valuenow",percent);
+    $("progress-text").textContent = regen ? `全て再生成 ${regen.current}/${regen.total} · ${job.error || job.message}` : `${job.current}/${job.total} 採用済み · ${job.error || job.message}`;
     const times = job.timings.slice(-5).map(t=>t.generation_sec);
     const seconds = times.length ? times.reduce((a,b)=>a+b,0)/times.length * (job.total-job.current) : null;
     $("timing").textContent = busy() && job.operation === "generate" && seconds > 0 ? `残り目安 ${Math.ceil(seconds/60)}分（生成実測から推定）` : "";
     $("cancel").classList.toggle("hidden",!busy()); $("cancel").disabled = job.cancel_requested;
-    for(const id of ["generate-all","generate-selected","regenerate","save-edit","judge","save-dictionary","find-pronunciations","import-pronunciations"]) $(id).disabled = !!busy();
+    for(const id of ["regenerate-all","generate-all","generate-selected","regenerate","save-edit","judge","save-dictionary","find-pronunciations","import-pronunciations"]) $(id).disabled = !!busy();
     for(const button of $("pronunciation-candidates").querySelectorAll("button")) button.disabled = !!busy();
     const readingPreview = job.pronunciation_preview;
     $("play-pronunciation").classList.toggle("hidden", !readingPreview);
@@ -156,7 +230,7 @@
     if(seg) {
       $("segment-title").textContent = `${seg.id} の編集`;
       $("original-text").textContent = `元の本文：${seg.original_text}`;
-      const editing = ["edit-text","edit-reading","edit-control","edit-pause"].includes(document.activeElement?.id);
+      const editing = ["edit-text","edit-reading","edit-control","edit-pause","edit-convert-numbers"].includes(document.activeElement?.id);
       if(renderedId !== `${job.id}/${seg.id}/${seg.revision}` && !editing) fillEditor(seg);
       const local=readLocal(draftKey(job.id,seg.id));
       $("resolve-edit").classList.toggle("hidden",!local || local.revision===seg.revision || (local.base && JSON.stringify(local.base)===JSON.stringify(seg.draft)));
@@ -181,7 +255,7 @@
   }
   setInterval(poll,1500);
   $("filter").onchange = () => {if(job) renderSegments();};
-  $("new-job").onclick = () => { job=null;selectedId=null;renderedId=null;sequence=[];$("audio").pause();$("setup").classList.remove("hidden");$("studio").classList.add("hidden");notice("");history.replaceState(null,"","/");refreshLibrary().catch(err=>notice(err.message,true)); };
+  $("new-job").onclick = () => { closeRename(); job=null;selectedId=null;renderedId=null;sequence=[];$("audio").pause();$("setup").classList.remove("hidden");$("studio").classList.add("hidden");notice("");history.replaceState(null,"","/");refreshLibrary().catch(err=>notice(err.message,true)); };
   $("script-file").onchange = async () => {
     const file = $("script-file").files[0]; if(!file) return;
     if(file.size > 1000000) return notice("台本ファイルは1 MB以内にしてください",true);
@@ -189,21 +263,16 @@
     $("mode").value = /\.(ssml|xml)$/i.test(file.name) ? "ssml" : /\.(md|markdown)$/i.test(file.name) ? "markdown" : "plain";
     saveSetup();
   };
-  $("reference").onchange = () => {
-    if(previewUrl) URL.revokeObjectURL(previewUrl);
-    const file = $("reference").files[0]; $("reference-player").classList.toggle("hidden",!file);
-    if(file) { previewUrl=URL.createObjectURL(file);$("reference-player").src=previewUrl; }
-  };
   function saveSetup() { store("voxcpm.setup",{title:$("title").value,script:$("script").value,mode:$("mode").value}); }
   for(const id of ["title","script","mode"]) $(id).addEventListener("input",saveSetup);
   $("preview").onclick = () => action(async () => {
     const data = await post("/api/preview",{script:$("script").value,mode:$("mode").value,config:config()});
-    $("preview-list").replaceChildren(...data.segments.map(seg => { const li=document.createElement("li");li.textContent=`${seg.id} · ${seg.text}（直前の間 ${seg.pause_before_sec}秒）`;return li; }));
+    $("preview-list").replaceChildren(...data.segments.map(seg => { const li=document.createElement("li");li.textContent=`${seg.id} · ${seg.text}（直前の間 ${seg.pause_before_sec}秒） — 読み: ${seg.prepared_reading}`;return li; }));
     notice(`${data.segments.length} セグメントに分割されます`);
   });
   $("job-form").onsubmit = (event) => {event.preventDefault();action(async () => {
     const body=new FormData();body.append("script",$("script").value);body.append("mode",$("mode").value);body.append("title",$("title").value);body.append("config",JSON.stringify(config()));
-    if($("reference").files[0]) body.append("reference",$("reference").files[0]);
+    window.referenceRecorder.appendTo(body);
     const data=await api("/api/jobs",{method:"POST",body});await openJob(data.id);
     notice(data.reference_warnings.join("\n") || "制作を保存しました。まず1〜2箇所を選んで試聴できます。");
   });};
@@ -220,6 +289,13 @@
     if(pendingLocal) throw new Error("選択箇所に未保存の編集があります。各箇所で編集を保存してください。");
     render(await post(`/api/jobs/${job.id}/generate`,{...request(),segment_ids:ids}));
   }
+  $("regenerate-all").onclick = () => action(async () => {
+    await saveEdit();
+    if (job.segments.some(s => readLocal(draftKey(job.id,s.id)))) throw new Error("未保存の編集を各箇所で保存してください。");
+    requireSavedDictionary();
+    if (!confirm(`「${job.title}」の全${job.segments.length}箇所を再生成します。全て検査に合格したら一括採用します。以前の音声は履歴に残ります。実行しますか？`)) return;
+    render(await post(`/api/jobs/${job.id}/regenerate-all`, request()));
+  });
   $("generate-all").onclick = () => action(()=>generate(null));
   $("generate-selected").onclick = () => action(async()=>{if(!checked.size) throw new Error("一覧のチェックボックスで試聴箇所を選択してください");await generate([...checked]);});
   $("cancel").onclick = () => action(async()=>render(await post(`/api/jobs/${job.id}/cancel`)));
@@ -294,7 +370,7 @@
     $("player-label").textContent=`読み確認：${preview.term} → ${preview.reading}`;
     $("player-detail").textContent=preview.text;$("audio").play().catch(err=>notice(err.message,true));
   };
-  $("fork-script").onclick = () => {const text=job.script, title=job.title,mode=job.mode;$("new-job").click();$("script").value=text;$("title").value=title+"（改訂）";$("mode").value=mode;saveSetup();notice("台本全体の改訂は新しい制作として保存します。元の制作と音声は保持されます。参照音声は再選択してください。");$("reference").value="";$("reference-player").classList.add("hidden");};
+  $("fork-script").onclick = () => {const text=job.script, title=job.title,mode=job.mode;$("new-job").click();$("script").value=text;$("title").value=title+"（改訂）";$("mode").value=mode;saveSetup();notice("台本全体の改訂は新しい制作として保存します。元の制作と音声は保持されます。参照音声は再選択してください。");window.referenceRecorder.clear();};
   function playOne(sid,vid,continuous=false) {
     if(!continuous) sequence=[];
     const seg=job.segments.find(s=>s.id===sid),v=seg.versions.find(v=>v.id===vid);

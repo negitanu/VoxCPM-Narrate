@@ -201,8 +201,9 @@ class ProductionService:
         metadata = {}
         wav = generate_wav(model, text=spoken, control=seg["draft"]["control"],
                            reference_audio=self._reference_audio(jid, cfg),
+                           reference_transcript=cfg.get("reference_transcript"),
                            cfg_value=cfg["cfg_value"], inference_timesteps=cfg["timesteps"],
-                           normalize=True, seed=cfg["seed"], input_metadata=metadata)
+                           normalize=self._convert_numbers(seg['draft'], cfg), seed=cfg["seed"], input_metadata=metadata)
         preview_id = uuid.uuid4().hex
         path = self.manager.job_dir(jid) / "pronunciation" / f"{preview_id}.wav"
         write_wav(path, wav, int(model.tts_model.sample_rate))
@@ -232,6 +233,11 @@ class ProductionService:
         text = draft["reading"] or draft["text"]
         return apply_dictionary(text, dictionary)
 
+    @staticmethod
+    def _convert_numbers(draft, config):
+        override = draft.get('convert_numbers')
+        return config.get('convert_numbers', True) if override is None else override
+
     def _generate(self, jid, sid, *, seed=None, overrides=None):
         job = self.manager.get(jid)
         seg = segment(job, sid)
@@ -241,7 +247,7 @@ class ProductionService:
             control=draft["control"],
             cfg_value=cfg["cfg_value"],
             inference_timesteps=cfg["timesteps"],
-            normalize=True,
+            normalize=self._convert_numbers(draft, cfg),
             seed=cfg["seed"] if seed is None else seed,
         )
         params.update(overrides or {})
@@ -256,12 +262,21 @@ class ProductionService:
         started = time.monotonic()
         input_metadata = {}
         wav = generate_wav(model, text=spoken, reference_audio=self._reference_audio(jid, cfg),
-                           input_metadata=input_metadata, **params)
+                           reference_transcript=cfg.get("reference_transcript"),
+                           input_metadata=input_metadata, retry_badcase=False, **params)
         sr = int(model.tts_model.sample_rate)
         vid = uuid.uuid4().hex[:16]
         path = self.manager.job_dir(jid) / "versions" / sid / f"{vid}.wav"
+        pace = None
+        if cfg.get("pace_mode", "off") != "off":
+            from voxcpm_narrate.speech_rate import adjust_rate
+            write_wav(path.with_suffix(".raw.wav"), wav, sr)
+            wav, pace = adjust_rate(wav, sr, input_metadata.get("prepared_reading", spoken),
+                                    cfg["target_mora_rate"])
+            pace["raw_sha256"] = file_hash(path.with_suffix(".raw.wav"))
         write_wav(path, wav, sr)
         v = dict(
+            speech_rate=pace,
             id=vid,
             created_at=now(),
             **draft,
@@ -319,11 +334,14 @@ class ProductionService:
                           reasons=["音声検査を実行できませんでした。ASRの設定を確認してください"],
                           windows=[])
         report = {**report, "sha256": digest}
+        pace = v.get("speech_rate")
+        if pace and (not pace["passed"] or pace.get("warning")):
+            report["warnings"] = [*report.get("warnings", []), "話速（参考）: " + pace["reason"]]
         self.manager.mutate(jid, lambda j: version(segment(j, sid), vid).update(content_check=report))
         return report
 
     def _checked_generate(self, jid, sid, **kwargs):
-        for attempt in range(4):  # Initial generation plus at most three retries.
+        for attempt in range(3):  # Initial generation plus at most two content retries.
             self.manager.checkpoint(jid)
             v = self._generate(jid, sid, **kwargs)
             report = self.verify_content(jid, sid, v["id"])
@@ -332,8 +350,8 @@ class ProductionService:
             if report.get("unavailable"):
                 break
             kwargs["seed"] = secrets.randbelow(2**31)
-            if attempt < 3:
-                self.manager.update(jid, message=f"{sid}: 原稿との不一致により再生成 ({attempt + 1}/3)")
+            if attempt < 2:
+                self.manager.update(jid, message=f"{sid}: 原稿との不一致により再生成 ({attempt + 1}/2)")
         message = "音声検査に合格しませんでした。候補の検査結果を確認してください"
         self.manager.mutate(jid, lambda j: segment(j, sid).update(
             status="ready" if segment(j, sid)["accepted"] else "pending"))
@@ -410,7 +428,7 @@ class ProductionService:
             status="ready",
             revision=seg["revision"] + 1,
             error=None,
-            draft={key: v[key] for key in ("text", "reading", "control", "pause_before_sec")},
+            draft={key: v.get(key) for key in ("text", "reading", "control", "pause_before_sec", "convert_numbers")},
             feedback=None,
         )
         # Build first; a crash leaves the previous accepted snapshot untouched.
@@ -439,6 +457,29 @@ class ProductionService:
             self.improve(jid, newly_generated, api_key)
         current = self.manager.get(jid)
         self.manager.update(jid, export=self._build_export(current))
+
+    def regenerate_all(self, jid):
+        ids = [s["id"] for s in self.manager.get(jid)["segments"]]
+        candidates = {}
+        for index, sid in enumerate(ids, 1):
+            self.manager.checkpoint(jid)
+            self.manager.update(jid, regeneration_progress={"current": index - 1, "total": len(ids)})
+            candidates[sid] = self._checked_generate(jid, sid, seed=secrets.randbelow(2**31))
+            self.manager.update(jid, regeneration_progress={"current": index, "total": len(ids)})
+        self.manager.checkpoint(jid)
+        job = self.manager.get(jid)
+        for seg in job["segments"]:
+            v = candidates[seg["id"]]
+            if seg["accepted"]:
+                seg["history"].append(seg["accepted"])
+            seg.update(accepted=v["id"], status="ready", revision=seg["revision"] + 1,
+                       error=None, feedback=None,
+                       draft={key: v.get(key) for key in ("text", "reading", "control", "pause_before_sec", "convert_numbers")})
+        export = self._build_export(job)
+        # Publish all accepted versions together; never leave a partially replaced production.
+        with self.manager._lock:
+            self.manager.checkpoint(jid)
+            self.manager.update(jid, segments=job["segments"], export=export)
 
     def regenerate(self, jid, sid):
         self.manager.mutate(

@@ -7,7 +7,7 @@
 <div class="shell">
 <aside class="sidebar" aria-label="制作一覧">
   <button id="new-job" class="primary">＋ 新しい制作</button>
-  <h2>ライブラリ</h2><nav id="library" aria-label="保存した制作"></nav>
+  <h2>ライブラリ</h2><label class="check"><input id="show-trash" type="checkbox">ごみ箱を表示</label><button id="empty-trash" class="hidden" type="button">ごみ箱を空にする</button><nav id="library" aria-label="保存した制作"></nav>
   <details class="import"><summary>以前の生成結果を取り込む</summary><label>生成済み run<select id="legacy-runs"></select></label><button id="import-run">コピーして取り込む</button><small>元のファイルは保持します。生成条件が不明な場合は既定値を使用します。</small></details>
 </aside>
 <main>
@@ -18,7 +18,38 @@
     <label>制作名<input id="title" maxlength="150" value="新しいナレーション" required></label>
     <div class="split"><label>入力形式<select id="mode"><option value="plain">プレーンテキスト</option><option value="markdown">Markdown（読み上げ本文）</option><option value="ssml">SSML</option><option value="lines">行ごとのテキスト</option></select></label><label>台本ファイルを取り込む<input id="script-file" type="file" accept=".txt,.md,.markdown,.ssml,.xml"></label></div>
     <label>台本 <small>読み込み後の編集内容が生成に使われます</small><textarea id="script" rows="10" placeholder="ここに読み上げる台本を入力してください。" required maxlength="200000"></textarea></label>
-    <div class="split"><label>参照音声（任意）<input id="reference" type="file" accept=".wav,.ogg,.mp3,.flac,.m4a,audio/*"><small>日本語で自然に話した5〜30秒の音声を推奨します。</small><audio id="reference-player" controls class="hidden"></audio></label><label>話し方<input id="control" value="日本語、明瞭な声、自然な抑揚、会話に近いテンポ" maxlength="1000"><small>出力は日本語。標準設定はモデル用の英語指示に変換します。</small></label></div>
+    <section class="reference-studio" aria-labelledby="reference-heading">
+      <h2 id="reference-heading">話し方と参照音声</h2>
+      <div class="split">
+        <label>話し方の例<select id="voice-style">
+          <option value="standard">標準 · 自然な説明</option><option value="calm">落ち着いたナレーション</option>
+          <option value="bright">明るい案内</option><option value="presentation">プレゼンテーション</option>
+          <option value="gentle">やさしい語りかけ</option><option value="custom">自由に指定</option>
+        </select></label>
+        <label>話し方<input id="control" value="日本語、明瞭な声、自然な抑揚、会話に近いテンポ" maxlength="1000"><small>例を選んだあとも自由に編集できます。</small></label>
+      </div>
+      <label>参照音声用の読み上げスクリプト<textarea id="reference-script" rows="4" maxlength="2000"></textarea></label>
+      <p id="reference-guidance" class="muted small"></p>
+      <p class="muted small">この例文を選んだ話し方で読んでください。自由に編集できます。制作する台本は変更されません。静かな場所で5〜30秒を目安に録音してください。</p>
+      <div class="actions"><button type="button" id="record-start">● 録音を開始</button><button type="button" id="record-stop" disabled>録音を停止</button><button type="button" id="reference-clear">参照音声を解除</button></div>
+      <p id="record-status" role="status" aria-live="polite">参照音声は未選択です。</p>
+      <label>音声ファイルを選ぶ（録音の代わりに使用）<input id="reference" type="file" accept=".wav,.ogg,.mp3,.flac,.m4a,.webm,.mp4,audio/*"></label>
+      <audio id="reference-player" controls class="hidden"></audio>
+      <p id="reference-source" class="muted small"></p>
+      <div id="transcript-panel" class="hidden">
+        <label class="check"><input id="use-transcript" type="checkbox">録音と文字起こしの両方から話し方を再現する</label>
+        <button id="transcribe-reference" type="button">録音を文字起こしする</button>
+        <label>実際に話した内容（確認・修正）<textarea id="reference-transcript" rows="4" maxlength="2000"></textarea></label>
+        <small>例文は仮入力です。録音を聴き、言い間違い・省略・途中で切れた部分も実際の発話に合わせてください。</small>
+        <label class="check"><input id="transcript-confirmed" type="checkbox">録音と文字起こしが一致することを確認しました</label>
+      </div>
+      <div class="split">
+        <label>平均話速を揃える<select id="pace-mode"><option value="off">補正しない</option><option value="reference">確認済みの録音に合わせる</option><option value="fixed">目標の話速を指定</option></select></label>
+        <label>目標話速（モーラ／秒）<input id="target-mora-rate" type="number" value="7" min="2" max="12" step="0.1"><small>目標指定時のみ使用。補正は±10%まで。大きな差や推定読みは原音を使い、話速だけで再生成しません。</small></label>
+      </div>
+    </section>
+    <label class="check"><input id="convert-numbers" type="checkbox" checked>数字・日付を日本語の読みに変換する</label>
+    <p class="muted small">例：2026年8月26日 → にせんにじゅうろくねんはちがつにじゅうろくにち。「分割を確認」で変換後の読みを確認できます。型番などは読み方の上書きで指定してください。</p>
     <details><summary>生成の詳細設定</summary><div class="settings-grid">
       <label>デバイス<select id="device"><option>auto</option><option>mps</option><option>cuda</option><option>cpu</option></select></label>
       <label>最大文字数<input id="max-chars" type="number" min="10" max="500" value="120"></label>
@@ -32,10 +63,14 @@
   </form>
 </section>
 <section id="studio" class="hidden">
-  <div class="eyebrow">PRODUCTION</div><div class="title-row"><h1 id="job-title"></h1><span id="job-status" class="tag"></span></div>
+  <div class="eyebrow">PRODUCTION</div><div class="title-row"><h1 id="job-title"></h1><button id="rename-job" type="button" aria-expanded="false" aria-controls="rename-form">制作名を変更</button><span id="job-status" class="tag"></span></div>
+  <form id="rename-form" class="hidden">
+    <label>新しい制作名<input id="rename-title" maxlength="150" required></label>
+    <div class="actions"><button type="submit">名前を保存</button><button id="cancel-rename" type="button">キャンセル</button></div>
+  </form>
   <div id="progress" role="progressbar" aria-label="生成済みセグメント" aria-valuemin="0" aria-valuemax="100"><div id="progress-fill"></div></div>
   <div class="progress-caption"><span id="progress-text" aria-live="polite"></span><span id="timing" class="muted"></span></div>
-  <div class="actions toolbar"><button class="primary" id="generate-all">未生成部分を生成・再開</button><button id="generate-selected">選択箇所を試聴生成</button><button id="cancel" class="hidden">中断する</button><button id="play-all">連続試聴</button><button id="fork-script">台本を編集して新規制作</button></div>
+  <div class="actions toolbar"><button class="primary" id="generate-all">未生成部分を生成・再開</button><button id="regenerate-all">全て再生成</button><button id="generate-selected">選択箇所を試聴生成</button><button id="cancel" class="hidden">中断する</button><button id="play-all">連続試聴</button><button id="fork-script">台本を編集して新規制作</button></div>
   <div class="workbench">
     <section class="segment-list-panel" aria-label="セグメント一覧"><div class="list-heading"><h2>セグメント</h2><select id="filter" aria-label="セグメントの絞り込み"><option value="all">すべて</option><option value="pending">未生成</option><option value="review">要確認・候補あり</option><option value="ready">採用済み</option></select></div><div id="segments"></div></section>
     <section id="editor" class="editor" aria-label="セグメント編集">
@@ -43,6 +78,7 @@
       <p id="original-text" class="original"></p>
       <label>読み上げ本文<textarea id="edit-text" rows="4" maxlength="2000"></textarea></label>
       <label>読み方の上書き（任意）<input id="edit-reading" maxlength="2000" placeholder="未入力なら本文と読み辞書を使用"></label>
+      <label>数字・日付の日本語読み<select id="edit-convert-numbers"><option value="">制作の設定に従う</option value="true">変換する</option><option value="false">変換しない</option></select><small>保存後の再生成から反映します。読み方の上書き・辞書の適用後に変換します。</small></label>
       <label>話し方<input id="edit-control" maxlength="1000"></label>
       <label>直前の間（秒）<input id="edit-pause" type="number" min="0" max="10" step="0.05"></label>
       <div class="actions"><button id="save-edit">編集を保存</button><button id="resolve-edit" class="hidden">保持した編集を最新状態に適用</button><button class="primary" id="regenerate">候補を再生成</button></div>
@@ -66,5 +102,6 @@
 </main>
 </div>
 <footer class="player"><div><strong id="player-label">試聴プレイヤー</strong><span id="player-detail" class="muted"></span></div><audio id="audio" controls preload="none"></audio><button id="stop">停止</button></footer>
+<script src="/static/reference-recorder.js"></script>
 <script src="/static/app.js"></script>
 </body></html>
