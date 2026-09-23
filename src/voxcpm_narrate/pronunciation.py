@@ -10,6 +10,17 @@ from pathlib import Path
 KANJI = re.compile(r"[一-龯々〆ヵヶ]{2,}")
 KATAKANA = re.compile(r"[ァ-ヶー]{3,}")
 LATIN = re.compile(r"[A-Za-z][A-Za-z0-9._+-]{1,}")
+NUMBER = re.compile(r"(?<![A-Za-z0-9_０-９.．])(?:[0-9０-９]{4}[年/／-][0-9０-９]{1,2}[月/／-][0-9０-９]{1,2}日?|[0-9０-９]+(?:[,，][0-9０-９]{3})*(?:[.．][0-9０-９]+)?(?:年|月|日|時|分|円|人|本|個|回|%|％)?)(?![A-Za-z0-9_０-９]|[.．][0-9０-９])")
+
+
+def word_category(term: str) -> str:
+    if re.search(r'[A-Za-z]', term):
+        return 'latin'
+    if re.search(r'[0-9０-９]', term):
+        return 'number'
+    if re.search(r'[一-龯々〆]', term):
+        return 'kanji'
+    return 'other'
 DEFAULT_KNOWN = {
     "これ", "それ", "こと", "もの", "ため", "ようす", "場合", "内容", "確認", "説明", "結果",
     "必要", "最初", "最後", "今日", "明日", "昨日", "時間", "方法", "場所", "資料", "作業",
@@ -43,7 +54,7 @@ def validate_reading(term: str, reading: str) -> None:
 
 def _candidate_terms(text: str) -> list[str]:
     found: list[str] = []
-    for pattern in (KANJI, KATAKANA, LATIN):
+    for pattern in (KANJI, KATAKANA, LATIN, NUMBER):
         found.extend(pattern.findall(text))
     # Preserve first appearance while avoiding nested/duplicate candidates.
     unique = []
@@ -68,11 +79,13 @@ def find_unknown_words(text: str, dictionary: dict[str, str] | None = None,
     uncovered = pattern.sub(lambda m: " " * len(m[0]), text) if pattern else text
     results = []
     for term in _candidate_terms(uncovered):
-        if term in known or term.isdigit() or len(term) < 2:
+        if term in known or (len(term) < 2 and not term.isdigit()):
             continue
         script = "漢字" if KANJI.fullmatch(term) else "カタカナ" if KATAKANA.fullmatch(term) else "英数字"
         index = uncovered.find(term)
-        results.append({"term": term, "reading": "", "script": script,
+        category = word_category(term)
+        results.append({"term": term, "reading": "", "script": '数字' if category == 'number' else script,
+                        "category": category,
                         "context": text[max(0, index - 30):index + len(term) + 30],
                         "occurrences": uncovered.count(term), "status": "review"})
     return results

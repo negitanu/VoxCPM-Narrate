@@ -238,7 +238,7 @@
       const local=readLocal(draftKey(job.id,seg.id));
       $("resolve-edit").classList.toggle("hidden",!local || local.revision===seg.revision || (local.base && JSON.stringify(local.base)===JSON.stringify(seg.draft)));
       renderVersions(seg);
-      $("judge").disabled = busy() || !seg.accepted;
+      $("judge").disabled = busy() || !seg.accepted || !$("llm-model").value;
       const feedback = seg.feedback?.version_id === seg.accepted ? seg.feedback : null;
       $("feedback-text").textContent = feedback?.feedback || "";
       $("suggestion").classList.toggle("hidden",!feedback);
@@ -258,18 +258,29 @@
   }
   setInterval(poll,1500);
   $("filter").onchange = () => {if(job) renderSegments();};
-  $("new-job").onclick = () => { closeRename(); job=null;selectedId=null;renderedId=null;sequence=[];$("audio").pause();$("setup").classList.remove("hidden");$("studio").classList.add("hidden");notice("");history.replaceState(null,"","/");refreshLibrary().catch(err=>notice(err.message,true)); };
+  let setupRevision = 0;
+  $("new-job").onclick = () => {
+    closeRename(); job=null;selectedId=null;renderedId=null;sequence=[];
+    setupRevision++;
+    $("title").value="";$("script").value="";$("script-file").value="";$("preview-list").replaceChildren();
+    saveSetup();
+    $("audio").pause();$("setup").classList.remove("hidden");$("studio").classList.add("hidden");notice("");history.replaceState(null,"","/");refreshLibrary().catch(err=>notice(err.message,true));
+  };
   $("script-file").onchange = async () => {
     const file = $("script-file").files[0]; if(!file) return;
     if(file.size > 1000000) return notice("台本ファイルは1 MB以内にしてください",true);
-    $("script").value = await file.text();
+    const revision=setupRevision, text=await file.text();
+    if(revision !== setupRevision || $("script-file").files[0] !== file)return;
+    $("script").value = text;
     $("mode").value = /\.(ssml|xml)$/i.test(file.name) ? "ssml" : /\.(md|markdown)$/i.test(file.name) ? "markdown" : "plain";
     saveSetup();
   };
   function saveSetup() { store("voxcpm.setup",{title:$("title").value,script:$("script").value,mode:$("mode").value}); }
   for(const id of ["title","script","mode"]) $(id).addEventListener("input",saveSetup);
   $("preview").onclick = () => action(async () => {
+    const revision=setupRevision;
     const data = await post("/api/preview",{script:$("script").value,mode:$("mode").value,config:config()});
+    if(revision !== setupRevision)return;
     $("preview-list").replaceChildren(...data.segments.map(seg => { const li=document.createElement("li");li.textContent=`${seg.id} · ${seg.text}（直前の間 ${seg.pause_before_sec}秒） — 読み: ${seg.prepared_reading}`;return li; }));
     notice(`${data.segments.length} セグメントに分割されます`);
   });
@@ -319,7 +330,7 @@
     lexiconRevision=data.lexicon.revision;
     $("lexicon-count").textContent=`共通辞書 ${Object.keys(data.lexicon.entries).length}語 · この制作 ${Object.keys(job.dictionary).length}語`;
     const cards=data.candidates.map(candidate=>{
-      const card=document.createElement("div");card.className="reading-card";
+      const card=document.createElement("div");card.className="reading-card";card.dataset.category=candidate.category || "other";
       const title=document.createElement("strong");title.textContent=`${candidate.term} · ${candidate.occurrences}箇所${candidate.status === "known" ? " · 登録済み" : ""}`;
       const context=document.createElement("p");context.className="muted small";context.textContent=candidate.context;
       const key=`voxcpm.reading.${jid}.${candidate.term}`, saved=readLocal(key);
@@ -354,6 +365,7 @@
     });
     if(!cards.length){const message=document.createElement("p");message.textContent="未登録の確認候補はありません。必要な読みは辞書の直接編集でも登録できます。";cards.push(message);}
     $("pronunciation-candidates").replaceChildren(...cards);
+    filterPronunciations();
     for(const button of $("pronunciation-candidates").querySelectorAll("button"))button.disabled=!!busy();
   }
   $("find-pronunciations").onclick=()=>action(async()=>{
@@ -362,6 +374,13 @@
     await loadPronunciations();notice("保存済みの最新本文から候補を更新しました。");
   });
   $("show-registered-readings").onchange=()=>action(loadPronunciations);
+  function filterPronunciations() {
+    const filter=$("reading-filter").value, cards=[...$("pronunciation-candidates").querySelectorAll(".reading-card")];
+    for(const card of cards) card.hidden=filter !== "all" && card.dataset.category !== filter;
+    const count=cards.filter(card=>!card.hidden).length;
+    $("reading-filter-status").textContent=`${count} / ${cards.length} 語を表示${!count && cards.length ? " · この条件に一致する候補はありません" : ""}`;
+  }
+  $("reading-filter").onchange=filterPronunciations;
   $("import-pronunciations").onclick=()=>action(async()=>{
     requireSavedDictionary();const jid=job.id,data=await post(`/api/jobs/${jid}/pronunciation-import`);
     if(job?.id!==jid)return;$("dictionary").value=dictionaryText(data.dictionary);render(data);
@@ -413,13 +432,21 @@
     });};
   }
   $("clear-key").onclick = () => {$("api-key").value="";localStorage.removeItem("voxcpm.openrouter.api_key");notice("入力キーと旧 localStorage キーを消去しました");};
-  function fillModels(models) {const previous=$("llm-model").value;$("llm-model").replaceChildren(...models.map(m=>{const o=document.createElement("option");o.value=m.id;o.textContent=`${m.name || m.id}${m.supportsAudio?" · 音声入力対応":""}`;return o;}));if(models.some(m=>m.id===previous))$("llm-model").value=previous;}
+  function fillModels(models) {
+    const previous=$("llm-model").value, audioModels=models.filter(m=>m.supportsAudio === true);
+    $("llm-model").replaceChildren(...audioModels.map(m=>{const o=document.createElement("option");o.value=m.id;o.textContent=`${m.name || m.id} · 音声入力対応`;return o;}));
+    if(audioModels.some(m=>m.id===previous))$("llm-model").value=previous;
+    else if(audioModels.some(m=>m.id===settings.default_audio_model))$("llm-model").value=settings.default_audio_model;
+    if(!audioModels.length){const o=document.createElement("option");o.value="";o.textContent="音声入力対応モデルがありません";$("llm-model").append(o);}
+    $("llm-model").disabled=!audioModels.length;
+    $("judge").disabled=!!busy() || !current()?.accepted || !audioModels.length;
+  }
   $("refresh-models").onclick = () => action(async()=>{const data=await api("/api/llm/models",{headers:{"X-API-Key":$("api-key").value.trim()}});fillModels(data.models);notice(`${data.models.length} モデルを取得しました`);});
   $("import-run").onclick = () => action(async()=>{if(!$("legacy-runs").value)throw new Error("取り込める run がありません");const data=await post("/api/import",{run:$("legacy-runs").value});await openJob(data.id);notice("元のファイルを保持して取り込みました");});
   document.addEventListener("keydown",event=>{if((event.ctrlKey||event.metaKey)&&event.key==="s"&&job){event.preventDefault();action(saveEdit);}});
   async function init() {
     const saved=readLocal("voxcpm.setup");if(saved){$("title").value=saved.title;$("script").value=saved.script;$("mode").value=saved.mode;}
-    settings=await api("/api/llm/settings");fillModels(settings.suggested_models);$("llm-model").value=settings.default_audio_model;
+    settings=await api("/api/llm/settings");fillModels(settings.suggested_models);
     $("key-status").textContent=settings.api_key_configured?"サーバーの API キーを利用できます":"外部評価を使う場合のみキーが必要です";
     if(localStorage.getItem("voxcpm.openrouter.api_key"))notice("以前保存された API キーがあります。外部評価設定の「旧保存キーを消去」で削除できます。");
     const health=await api("/api/health");$("health").textContent=health.ok?"接続中":"接続エラー";

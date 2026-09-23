@@ -174,7 +174,7 @@ def settings():
         default_model=default_llm_model(),
         default_audio_model=default_audio_judge_model(),
         api_key_configured=bool(default_llm_api_key()),
-        suggested_models=list(OPENROUTER_MODELS),
+        suggested_models=[m for m in OPENROUTER_MODELS if m.get('supportsAudio') is True],
     )
 
 
@@ -186,7 +186,7 @@ def models(x_api_key: str | None = Header(default=None)):
         raise HTTPException(
             502, "モデル一覧を取得できませんでした。接続とキーを確認してください"
         ) from exc
-    return {"models": items}
+    return {"models": [m for m in items if m.get('supportsAudio') is True]}
 
 
 @app.post("/api/preview")

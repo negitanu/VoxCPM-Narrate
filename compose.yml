@@ -1,0 +1,34 @@
+services:
+  narrate:
+    image: voxcpm-narrate:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 60s
+    ports:
+      # The UI has no authentication. Put an authenticated TLS proxy in front
+      # before changing the host binding for a cloud deployment.
+      - "${VOXCPM_BIND_ADDRESS:-127.0.0.1}:${VOXCPM_WEB_PORT:-7860}:7860"
+    environment:
+      VOXCPM_WEB_HOST: "0.0.0.0"
+      VOXCPM_WEB_PORT: "7860"
+      VOXCPM_ALLOW_REMOTE: "1"
+      VOXCPM_WEB_OUT: /app/output/voxcpm2/web_jobs
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      OPENROUTER_MODEL: "${OPENROUTER_MODEL:-openai/gpt-4o-mini}"
+      OPENROUTER_AUDIO_MODEL: "${OPENROUTER_AUDIO_MODEL:-google/gemini-2.0-flash-001}"
+      OPENROUTER_BASE_URL: "${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}"
+      OPENROUTER_HTTP_REFERER: "${OPENROUTER_HTTP_REFERER:-https://localhost}"
+      HF_TOKEN: "${HF_TOKEN:-}"
+    volumes:
+      - output:/app/output
+      - model-cache:/home/narrate/.cache
+      - ./workspace:/app/workspace:ro
+    # One worker owns the SQLite database and in-memory generation queue.
+    # Do not scale multiple instances against the same output volume.
+
+volumes:
+  output:
+  model-cache:

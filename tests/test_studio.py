@@ -32,6 +32,25 @@ class FakeModel:
 
 
 class StudioTests(unittest.TestCase):
+    def test_model_lists_hide_non_audio_and_unknown_capabilities(self):
+        settings = self.client.get('/api/llm/settings').json()
+        self.assertTrue(settings['suggested_models'])
+        self.assertTrue(all(m['supportsAudio'] is True for m in settings['suggested_models']))
+        with patch.object(web, 'fetch_openrouter_models', return_value=[
+            {'id': 'audio', 'supportsAudio': True}, {'id': 'text', 'supportsAudio': False},
+            {'id': 'unknown'}]):
+            self.assertEqual(self.client.get('/api/llm/models').json()['models'],
+                             [{'id': 'audio', 'supportsAudio': True}])
+
+    def test_registered_candidates_keep_filter_category(self):
+        job = self.create('2026年に東京支社でAIを使います。')
+        self.manager.mutate(job['id'], lambda j: j.update(dictionary={'2026年': 'にせんにじゅうろくねん', 'AI': 'エーアイ'}))
+        items = self.service.pronunciation_candidates(job['id'], include_registered=True)
+        categories = {item['term']: item['category'] for item in items}
+        self.assertEqual(categories['2026年'], 'number')
+        self.assertEqual(categories['AI'], 'latin')
+        self.assertEqual(categories['東京支社'], 'kanji')
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.manager = JobManager(Path(self.tmp.name))

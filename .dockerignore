@@ -1,0 +1,19 @@
+# Allow only public application/build inputs into the Docker build context.
+# Local .env files, recordings, output, workspace, .git and .venv stay on the host.
+*
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!src/
+!src/**
+!examples/
+!examples/*.md
+!examples/*.ssml
+!benchmarks/
+!benchmarks/*.json
+
+**/__pycache__/
+**/*.py[cod]
+**/.DS_Store

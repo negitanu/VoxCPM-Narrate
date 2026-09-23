@@ -24,7 +24,7 @@ from voxcpm_narrate.harness.judge import LlmJudge, default_llm_api_key
 from voxcpm_narrate.harness.loop import evaluate_segment
 from voxcpm_narrate.harness.strategies import GenParams, build_strategies
 from voxcpm_narrate.pronunciation import (
-    apply_dictionary, dictionary_pattern, find_unknown_words, validate_reading,
+    apply_dictionary, dictionary_pattern, find_unknown_words, validate_reading, word_category,
 )
 from voxcpm_narrate.synthesize import assemble_full_wav, generate_wav, load_model
 from voxcpm_narrate.web.jobs import (
@@ -159,7 +159,8 @@ class ProductionService:
             if include_registered and pattern:
                 for match in pattern.finditer(text):
                     items.append({"term": match[0], "reading": dictionary[match[0]],
-                                  "script": "登録済み", "status": "known", "occurrences": 1,
+                                  "script": "登録済み", "category": word_category(match[0]),
+                                  "status": "known", "occurrences": 1,
                                   "context": text[max(0, match.start() - 30):match.end() + 30]})
             for item in items:
                 term = item["term"]

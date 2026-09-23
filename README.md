@@ -29,6 +29,8 @@
 12. [トラブルシューティング](#トラブルシューティング)
 13. [ライセンス](#ライセンス)
 
+コンテナで利用する場合は [Docker / クラウドでの起動](#docker--クラウドでの起動) を参照してください。
+
 ---
 
 ## ディレクトリ構成
@@ -138,6 +140,105 @@ cp /path/to/recording.wav workspace/source.wav
 | 参照声音 | `workspace/source.*` → `workspace/reference.*` → `./source.*` → `./reference.*` |
 
 環境変数で上書き可能: `VOXCPM_INPUT` / `VOXCPM_REFERENCE` / `VOXCPM_OUT_ROOT` / `VOXCPM_RUN_DIR`
+
+---
+
+## Docker / クラウドでの起動
+
+Docker Engine / Docker Desktop と Docker Compose v2 以降を使用します。
+Python 3.12、ffmpeg、libsndfile と `uv.lock` の依存関係をイメージに含めるため、
+ホスト側で Python や uv を用意する必要はありません。
+
+```sh
+docker compose up --build -d
+docker compose logs -f narrate
+# http://127.0.0.1:7860
+
+# 停止（制作データとモデルキャッシュは保持）
+docker compose down
+```
+
+既定では GPU を要求せず、UI のデバイス設定 `auto` で CPU を利用します。
+Apple Silicon の Docker 内では MPS を利用できません。CPU 合成は時間がかかるため、
+まず短い台本で確認してください。モデルは最初の合成・ASR 実行時にダウンロードされます。
+初回はインターネット接続と数 GB 以上のモデル保存領域が必要です。
+Linux 用 PyTorch の CUDA 依存も含む共通イメージのため、ビルド用にも十分な空き容量を確保してください。
+
+### 保存先と設定
+
+- `output` 名前付きボリューム → `/app/output`：SQLite、参照音声、生成音声、読み辞書など。
+- `model-cache` 名前付きボリューム → `/home/narrate/.cache`：Hugging Face / ModelScope などのキャッシュ。
+- ホストの `./workspace` → `/app/workspace`：CLI の入力や既存 run の移行元。読み取り専用です。
+
+ホストの既存 `output/` は自動では取り込みません。既存 run を `workspace/` に置き、
+次のようにボリューム内へコピーしてから Web UI の既存 run 一覧で取り込みます
+（`run_YYYYMMDD_HHMMSS` は実際の run ディレクトリ名に置き換えてください）。
+
+```sh
+docker compose exec narrate cp -R /app/workspace/run_YYYYMMDD_HHMMSS /app/output/voxcpm2/
+```
+
+生成物は Web UI からダウンロードするか、`docker compose cp narrate:/app/output ./container-output` で取り出せます。
+`docker compose down -v` は制作データとモデルキャッシュも削除するので、通常の停止では `-v` を付けないでください。
+
+`.env` またはシェルの環境変数で `VOXCPM_WEB_PORT`（ホスト側ポート、既定 `7860`）、
+`OPENROUTER_API_KEY`、`OPENROUTER_MODEL`、`OPENROUTER_AUDIO_MODEL`、`HF_TOKEN` などを設定できます。
+`.env` 自体はコンテナにコピーせず、Compose が明示した変数だけを実行時に渡します。
+コンテナ内のポートは `7860`、制作データの保存先は `/app/output/voxcpm2/web_jobs` に固定しています。
+`.dockerignore` により、ローカルの秘密情報・録音・制作データ・仮想環境をビルドコンテキストから除外します。
+
+CLI も同じイメージで使用できます（zsh ラッパーの代わりに Python の CLI を直接実行）。
+
+```sh
+docker compose run --rm narrate voxcpm-narrate --help
+```
+
+### NVIDIA GPU
+
+Linux の GPU ホストに、ロックされた PyTorch の CUDA ランタイムに対応する NVIDIA ドライバーと
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+を導入してから起動します。同じイメージに GPU 1 枚を割り当てます。
+
+```sh
+docker compose -f compose.yml -f compose.gpu.yml up --build -d
+docker compose -f compose.yml -f compose.gpu.yml exec narrate \
+  python -c "import torch; print('CUDA:', torch.version.cuda); print('available:', torch.cuda.is_available())"
+```
+
+`available: True` を確認し、Web UI で `auto` または `cuda` を選択してください。
+GPU 割り当ては [Docker Compose の device reservations](https://docs.docker.com/compose/how-tos/gpu-support/) を使用します。
+
+### クラウドでの運用
+
+イメージ単体でも起動できます。コンテナ内では全インターフェイスで待ち受けるため、
+アプリの外部接続許可 `VOXCPM_ALLOW_REMOTE=1` を明示してください。
+
+```sh
+docker build -t voxcpm-narrate:local .
+docker run --rm --init -p 127.0.0.1:7860:7860 \
+  -e VOXCPM_ALLOW_REMOTE=1 \
+  -v narrate-output:/app/output \
+  -v narrate-model-cache:/home/narrate/.cache \
+  voxcpm-narrate:local
+```
+
+イメージは既定でビルド元の CPU アーキテクチャ用になります。Apple Silicon から
+x86_64 のクラウド VM 向けに作る場合は、ビルドに `--platform linux/amd64` を付けてください。
+
+Compose はホストの `127.0.0.1` にのみポートを公開します。クラウド VM でもこのまま
+SSH トンネルや同一ホスト上のリバースプロキシから接続できます。
+ロードバランサーなどから接続する場合は、認証・TLS・アクセス制御を用意したうえで
+`VOXCPM_BIND_ADDRESS=0.0.0.0` を設定し、ファイアウォールで接続元を制限してください。
+アプリ自体に認証機能はありません。Compose の `VOXCPM_ALLOW_REMOTE=1` はコンテナのネットワーク越しに
+接続するための設定であり、認証を追加するものではありません。
+
+マネージドコンテナ基盤では `/app/output` と `/home/narrate/.cache` に永続ディスクを割り当て、
+実行ユーザー UID/GID `10001:10001` に書き込み権限を与えてください。
+既定の名前付きボリュームはイメージ内ディレクトリの権限で初期化されますが、bind mount や
+クラウドのディスクでは事前に権限の設定が必要です。
+SQLite とインメモリの生成キューを使用するため、同じ保存先を共有するプロセス・レプリカは **1 個** にします。
+常時稼働の CPU/GPU と十分なメモリを割り当て、合成中にスケールゼロにならない構成にしてください。
+ヘルスチェックは `/api/health`（HTTP サーバーの生存確認）で、モデルのロード完了や GPU の利用可否は判定しません。
 
 ---
 

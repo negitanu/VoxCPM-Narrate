@@ -93,6 +93,8 @@
     <p class="muted small">読みを入力し、文中で試聴してから登録できます。「次の制作でも使う」を選ぶと共通辞書に蓄積します。候補は簡易抽出のため、通常の語が含まれる場合や見落としがあります。</p>
     <div class="actions"><button id="find-pronunciations">読みの確認候補を更新</button><button id="import-pronunciations">共通辞書を取り込む</button><span id="lexicon-count" class="muted small"></span></div>
     <label class="check"><input id="show-registered-readings" type="checkbox">登録済みの語も再確認する</label>
+    <label>読み確認候補の絞り込み<select id="reading-filter"><option value="all">すべて</option><option value="latin">英単語・英数字</option><option value="number">数字・日付</option><option value="kanji">漢字</option><option value="other">その他（カタカナなど）</option></select></label>
+    <p id="reading-filter-status" class="muted small" aria-live="polite"></p>
     <div id="pronunciation-candidates" aria-live="polite"></div>
     <div class="actions"><button id="play-pronunciation" class="hidden">最新の読み試聴を再生</button><span id="pronunciation-preview-note" class="muted small"></span></div>
     <details><summary>登録済みの読みを直接編集する</summary><label>1行に「表記=読み」を入力<textarea id="dictionary" rows="4" placeholder="VoxCPM=ボックスシーピーエム"></textarea></label><button id="save-dictionary">この制作の読み辞書を保存</button></details>
