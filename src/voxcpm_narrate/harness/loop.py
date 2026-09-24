@@ -99,6 +99,7 @@ def run_improve_loop(
     use_asr: bool,
     asr_device: str,
     use_llm: bool,
+    llm_provider: str = "openrouter",
     llm_base_url: str,
     llm_model: str,
     llm_api_key: str,
@@ -122,7 +123,8 @@ def run_improve_loop(
 
     asr = AsrTranscriber(device=asr_device) if use_asr else None
     judge = (
-        LlmJudge(base_url=llm_base_url, model=llm_model, api_key=llm_api_key) if use_llm else None
+        LlmJudge(provider=llm_provider, base_url=llm_base_url, model=llm_model, api_key=llm_api_key)
+        if use_llm else None
     )
 
     # Probe sample rate from first existing wav

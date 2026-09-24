@@ -101,11 +101,11 @@ uv sync
 | **基本（推奨）** | 参照声音（`run_dir/reference.wav` または `--reference`） | 再生成時も声色を固定 |
 | **ASR あり** | 追加インストール不要（`funasr` / SenseVoice は voxcpm 経由で利用） | 読み誤り検知（CER） |
 | **ASR あり** | 初回の SenseVoice モデルダウンロード（ネット接続） | `--asr` 初回のみ |
-| **LLM 判定あり** | [OpenRouter](https://openrouter.ai/) API キー | イントネーション違和感の補助判定 |
-| **LLM 判定あり** | モデル ID（例: `openai/gpt-4o-mini`） | `--llm-judge` / Web UI |
+| **LLM 判定あり** | OpenRouter または Azure OpenAI Service の API キー | イントネーション違和感の補助判定 |
+| **LLM 判定あり** | OpenRouter のモデル ID、または Azure のデプロイ名 | `--llm-judge` / Web UI |
 
 > 最低限は **基本だけ** で回せます（話速・無音・エネルギーなどの音響指標）。  
-> `--asr` と `--llm-judge`（OpenRouter）は精度を上げるオプションです。
+> `--asr` と `--llm-judge`（OpenRouter / Azure OpenAI）は精度を上げるオプションです。
 
 ---
 
@@ -182,7 +182,7 @@ docker compose exec narrate cp -R /app/workspace/run_YYYYMMDD_HHMMSS /app/output
 `docker compose down -v` は制作データとモデルキャッシュも削除するので、通常の停止では `-v` を付けないでください。
 
 `.env` またはシェルの環境変数で `VOXCPM_WEB_PORT`（ホスト側ポート、既定 `7860`）、
-`OPENROUTER_API_KEY`、`OPENROUTER_MODEL`、`OPENROUTER_AUDIO_MODEL`、`HF_TOKEN` などを設定できます。
+`OPENROUTER_API_KEY`、`OPENROUTER_MODEL`、`OPENROUTER_AUDIO_MODEL`、Azure の接続設定、`HF_TOKEN` などを設定できます。
 `.env` 自体はコンテナにコピーせず、Compose が明示した変数だけを実行時に渡します。
 コンテナ内のポートは `7860`、制作データの保存先は `/app/output/voxcpm2/web_jobs` に固定しています。
 `.dockerignore` により、ローカルの秘密情報・録音・制作データ・仮想環境をビルドコンテキストから除外します。
@@ -276,7 +276,9 @@ uv run voxcpm-narrate-web
 
 参照声音は任意です。指定した場合は制作ごとにコピー・変換して保存し、元ファイルを移動しても再生成できます。入力内容や候補を含む制作データは `VOXCPM_WEB_OUT` 以下に保存されます。
 
-自己改善で LLM 判定を使う場合は、設定パネルで API キーとモデルを選びます（入力キーはタブのメモリ内のみ、またはサーバーの `OPENROUTER_API_KEY` を使用）。以前 localStorage に保存したキーは設定パネルから消去できます。
+自己改善で LLM 判定を使う場合は、設定パネルで OpenRouter または Azure OpenAI Service と評価モデルを選びます。入力キーはタブのメモリ内のみで、サーバーの環境変数からも利用できます。以前 localStorage に保存したキーは設定パネルから消去できます。プロバイダーは制作の保存時に固定され、既存の制作は OpenRouter のままです。
+
+Azure を使う場合はサーバーに `AZURE_OPENAI_ENDPOINT`（リソース URL）と `AZURE_OPENAI_API_KEY` を設定します。テキスト評価には `AZURE_OPENAI_TEXT_DEPLOYMENT`、音声評価には `AZURE_OPENAI_AUDIO_DEPLOYMENT` を指定します（Web UI からデプロイ名を入力することもできます）。音声評価には音声入力対応のデプロイが必要です。Azure の [v1 Chat Completions API](https://learn.microsoft.com/en-us/azure/foundry/openai/api-version-lifecycle) を使用し、`api-version` は指定しません。API キーをリポジトリにコミットしないでください。
 
 制作データとジョブ成果物は `output/voxcpm2/web_jobs/<job_id>/` に保存されます。制作一覧と状態は同じ場所の `productions.sqlite3` に保存されます。
 
@@ -394,7 +396,7 @@ Web UI は次の API を使用します。API キーは制作 JSON や SQLite �
 | `GET /api/jobs/{id}/archive?normalize=true` | 仕上げ WAV・測定値・原音などを ZIP で保存 |
 | `GET /api/legacy-runs` / `POST /api/import` | CLI run を検索して制作へ取り込む |
 
-音声評価を OpenRouter に送る場合は、画面に示す送信内容を確認してください。「音声を聴いて改善提案」の結果は音声版に紐づけて保存し、提案の取り込み・再生成・採用を個別に操作できます。生成時の自己改善ループは、条件を満たした候補を自動採用します。
+音声評価を OpenRouter または Azure OpenAI に送る場合は、画面に示す送信内容を確認してください。Azure の音声入力は 20 MB 以下に制限しています。「音声を聴いて改善提案」の結果は音声版に紐づけて保存し、提案の取り込み・再生成・採用を個別に操作できます。生成時の自己改善ループは、条件を満たした候補を自動採用します。
 
 > 長い台本（20分級）はローカル推論のため数十分〜かかる場合があります。タブを閉じてもサーバ側のジョブは継続します（`./serve_web.zsh` を止めない限り）。
 
@@ -588,7 +590,7 @@ uv run voxcpm-narrate synthesize \
 - [ ] 再生成用に VoxCPM2 が動く（`uv sync` 済み）
 - [ ] （推奨）`reference.wav` がある、または `--reference` を渡せる
 - [ ] （任意）`--asr` を使うならネットで SenseVoice を取得できる
-- [ ] （任意）`--llm-judge` を使うなら `OPENROUTER_API_KEY` が設定されている
+- [ ] （任意）`--llm-judge` を使うなら、選択したプロバイダーの API キーとモデル / デプロイ名が設定されている
 
 ```zsh
 # 前提の確認例
@@ -601,7 +603,7 @@ ls output/voxcpm2/latest/segments | head
 1. 各セグメントを採点  
    - **音響**: 話速（文字/秒）、前後無音、クリップ、エネルギー安定性  
    - **ASR（任意）**: SenseVoice で書き起こし → 台本との CER  
-   - **LLM（任意）**: [OpenRouter](https://openrouter.ai/) 経由で台本・ASR・メトリクスから違和感を JSON 判定
+   - **LLM（任意）**: OpenRouter または Azure OpenAI 経由で台本・ASR・メトリクスから違和感を JSON 判定
 2. 総合スコアが閾値未満（既定 `0.62`）を **awkward** とみなす  
 3. 戦略を順に試す（最大 `--max-rounds` 回）  
    - seed 変更 / CFG 下げ / 話し方プロンプト / diffusion steps 増やす など。日本語の入力は読みを保持し、中国語・英語用のテキスト正規化には渡しません。
@@ -622,6 +624,12 @@ ls output/voxcpm2/latest/segments | head
 export OPENROUTER_API_KEY='your-key-here'
 ./improve_speech.zsh --asr --llm-judge --llm-model openai/gpt-4o-mini
 
+# ASR + Azure OpenAI LLM（デプロイ名は Azure 上で作成した名前）
+export AZURE_OPENAI_ENDPOINT='https://your-resource.openai.azure.com/'
+export AZURE_OPENAI_API_KEY='your-key-here'
+export AZURE_OPENAI_TEXT_DEPLOYMENT='narration-text'
+./improve_speech.zsh --asr --llm-judge --llm-provider azure
+
 # 評価だけ（再生成しない）
 ./improve_speech.zsh --max-rounds 0
 
@@ -632,7 +640,7 @@ export OPENROUTER_API_KEY='your-key-here'
 ./improve_speech.zsh --run-dir output/voxcpm2/run_YYYYMMDD_HHMMSS --asr
 ```
 
-OpenRouter のキーは `.env`（Web UI が読込）または環境変数で渡せます。Web UI では設定パネルからモデル選択もできます。
+API キーは `.env`（Web UI が読込）または環境変数で渡せます。CLI の既定プロバイダーは `VOXCPM_LLM_PROVIDER` で切り替えられます。Web UI では設定パネルからプロバイダーとモデル / デプロイ名を選択できます。
 
 ### 改善ループの成果物
 
@@ -656,10 +664,11 @@ output/voxcpm2/latest/
 | `--threshold` | `0.62` | これ未満を awkward |
 | `--asr` | off | SenseVoice + CER |
 | `--asr-device` | `cpu` | ASR デバイス |
-| `--llm-judge` | off | OpenRouter LLM 判定 |
-| `--llm-base-url` | `https://openrouter.ai/api/v1` | OpenAI 互換 endpoint |
-| `--llm-model` | `openai/gpt-4o-mini` | 判定モデル（`OPENROUTER_MODEL` 可） |
-| `--llm-api-key` | `OPENROUTER_API_KEY` | API キー |
+| `--llm-judge` | off | OpenRouter / Azure OpenAI LLM 判定 |
+| `--llm-provider` | `openrouter` | `azure` も指定可（`VOXCPM_LLM_PROVIDER` で変更可） |
+| `--llm-base-url` | プロバイダーの環境変数 | OpenRouter API URL または Azure リソース URL |
+| `--llm-model` | プロバイダーの環境変数 | OpenRouter モデル ID または Azure テキスト用デプロイ名 |
+| `--llm-api-key` | プロバイダーの環境変数 | `OPENROUTER_API_KEY` または `AZURE_OPENAI_API_KEY` |
 | `--segment-id` | — | 対象を限定（繰り返し可） |
 | `--all` | off | awkward 以外も改善対象にする |
 | `--limit` | — | 先頭 N セグメントのみ |
@@ -759,7 +768,7 @@ cp /path/to/voice.wav workspace/source.wav
 | 声がセグメントごとに揺れる | 同じ `--reference` と `--seed` を固定 |
 | 長文でノイズ | `--max-chars 80`、`--cfg 1.6` |
 | ASR 初回が遅い | SenseVoice のダウンロード中。完了後はキャッシュ利用 |
-| LLM 判定が効かない | `OPENROUTER_API_KEY` / Web UI の API キーとモデル ID を確認。課金・モデル公開状態も確認 |
+| LLM 判定が効かない | 選択したプロバイダーの API キーとモデル ID / デプロイ名を確認。Azure は `AZURE_OPENAI_ENDPOINT` とデプロイの対応 API も確認 |
 | 改善で置換されない | 候補スコアが元より十分に上がっていない。`--max-rounds` を増やすか `--threshold` を調整 |
 | 仕上げ WAV を作れない | `ffmpeg` を確認。無音・極小音量・3秒未満は安全のため仕上げ対象外 |
 | 数字の読みを変えたくない | `--no-normalize`。固有名詞は Web の読み辞書または SSML `<sub alias>` で指定 |

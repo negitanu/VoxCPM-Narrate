@@ -1,4 +1,4 @@
-"""Optional LLM intonation judge via OpenAI-compatible HTTP API (OpenRouter by default)."""
+"""Optional LLM intonation judge via OpenRouter or Azure OpenAI."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import math
 import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
@@ -101,33 +102,91 @@ score は高いほど自然。awkward=true は聞き手に違和感が出そう�
 
 
 def default_llm_base_url() -> str:
-    return os.environ.get("OPENROUTER_BASE_URL") or os.environ.get(
-        "VOXCPM_LLM_BASE_URL", OPENROUTER_BASE_URL
-    )
+    return default_provider_base_url(default_llm_provider())
 
 
-def default_llm_model() -> str:
+def default_llm_provider() -> str:
+    provider = os.environ.get("VOXCPM_LLM_PROVIDER", "openrouter").strip().lower()
+    if provider not in {"openrouter", "azure"}:
+        raise ValueError("VOXCPM_LLM_PROVIDER must be openrouter or azure")
+    return provider
+
+
+def default_provider_base_url(provider: str) -> str:
+    if provider == "azure":
+        return os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip()
+    if provider == "openrouter":
+        return os.environ.get("OPENROUTER_BASE_URL") or os.environ.get(
+            "VOXCPM_LLM_BASE_URL", OPENROUTER_BASE_URL
+        )
+    raise ValueError(f"Unsupported LLM provider: {provider}")
+
+
+def default_llm_model(provider: str | None = None) -> str:
+    if (provider or default_llm_provider()) == "azure":
+        return (os.environ.get("AZURE_OPENAI_TEXT_DEPLOYMENT")
+                or os.environ.get("AZURE_OPENAI_AUDIO_DEPLOYMENT") or "").strip()
     return os.environ.get("OPENROUTER_MODEL") or os.environ.get(
         "VOXCPM_LLM_MODEL", DEFAULT_OPENROUTER_MODEL
     )
 
 
-def default_audio_judge_model() -> str:
+def default_audio_judge_model(provider: str | None = None) -> str:
+    if (provider or default_llm_provider()) == "azure":
+        return os.environ.get("AZURE_OPENAI_AUDIO_DEPLOYMENT", "").strip()
     return os.environ.get("OPENROUTER_AUDIO_MODEL") or os.environ.get(
         "VOXCPM_AUDIO_JUDGE_MODEL", DEFAULT_AUDIO_JUDGE_MODEL
     )
 
 
-def default_llm_api_key() -> str:
+def default_llm_api_key(provider: str | None = None) -> str:
+    if (provider or default_llm_provider()) == "azure":
+        return os.environ.get("AZURE_OPENAI_API_KEY", "").strip()
     return os.environ.get("OPENROUTER_API_KEY") or os.environ.get("VOXCPM_LLM_API_KEY") or ""
 
 
+def azure_v1_base_url(endpoint: str) -> str:
+    """Accept an Azure resource endpoint or its /openai/v1 base URL."""
+    parsed = urllib.parse.urlsplit(endpoint.strip())
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+            or parsed.query or parsed.fragment or parsed.path.rstrip("/") not in {"", "/openai/v1"}):
+        raise ValueError("Azure OpenAI endpoint must be an HTTPS resource URL or /openai/v1 URL")
+    return f"https://{parsed.netloc}/openai/v1"
+
+
+def chat_completion_request(
+    *, provider: str, base_url: str | None, api_key: str, payload: dict, app_title: str,
+    http_referer: str | None = None,
+) -> urllib.request.Request:
+    """Build provider-specific authentication for the shared chat payload."""
+    if provider == "azure":
+        root = azure_v1_base_url(base_url or default_provider_base_url("azure"))
+        headers = {"Content-Type": "application/json", "api-key": api_key}
+    elif provider == "openrouter":
+        root = (base_url or default_provider_base_url("openrouter")).rstrip("/")
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "HTTP-Referer": http_referer or os.environ.get(
+                "OPENROUTER_HTTP_REFERER", "https://github.com/negitanu/VoxCPM-Narrate"
+            ),
+            "X-Title": app_title,
+        }
+    else:
+        raise ValueError(f"Unsupported LLM provider: {provider}")
+    return urllib.request.Request(
+        f"{root}/chat/completions", data=json.dumps(payload).encode("utf-8"),
+        headers=headers, method="POST",
+    )
+
+
 class LlmJudge:
-    """OpenAI-compatible chat-completions judge (OpenRouter / any compatible endpoint)."""
+    """Chat-completions judge for OpenRouter or Azure OpenAI."""
 
     def __init__(
         self,
         *,
+        provider: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
         api_key: str | None = None,
@@ -135,9 +194,10 @@ class LlmJudge:
         http_referer: str | None = None,
         app_title: str = "voxcpm-narrate",
     ):
-        self.base_url = (base_url or default_llm_base_url()).rstrip("/")
-        self.model = model or default_llm_model()
-        self.api_key = api_key if api_key is not None else default_llm_api_key()
+        self.provider = provider or default_llm_provider()
+        self.base_url = base_url or default_provider_base_url(self.provider)
+        self.model = model or default_llm_model(self.provider)
+        self.api_key = api_key if api_key is not None else default_llm_api_key(self.provider)
         self.timeout_sec = timeout_sec
         self.http_referer = http_referer or os.environ.get(
             "OPENROUTER_HTTP_REFERER", "https://github.com/negitanu/VoxCPM-Narrate"
@@ -159,25 +219,16 @@ class LlmJudge:
         )
         payload = {
             "model": self.model,
-            "temperature": 0.1,
             "messages": [
                 {"role": "system", "content": JUDGE_SYSTEM},
                 {"role": "user", "content": user},
             ],
         }
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
-        }
-        if "openrouter.ai" in self.base_url:
-            headers["HTTP-Referer"] = self.http_referer
-            headers["X-Title"] = self.app_title
-
-        req = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST",
+        if self.provider == "openrouter":
+            payload["temperature"] = 0.1
+        req = chat_completion_request(
+            provider=self.provider, base_url=self.base_url, api_key=self.api_key,
+            payload=payload, app_title=self.app_title, http_referer=self.http_referer,
         )
         try:
             with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
@@ -230,7 +281,7 @@ def _parse_judgement(content: str) -> LlmJudgement:
 
 def fetch_openrouter_models(*, api_key: str, base_url: str | None = None) -> list[dict]:
     """Return a compact model list from OpenRouter (id + name)."""
-    root = (base_url or default_llm_base_url()).rstrip("/")
+    root = (base_url or default_provider_base_url("openrouter")).rstrip("/")
     req = urllib.request.Request(
         f"{root}/models",
         headers={

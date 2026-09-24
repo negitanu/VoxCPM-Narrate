@@ -1,10 +1,9 @@
-"""Pattern B: auditory multimodal judge via OpenRouter (audio-capable models)."""
+"""Pattern B: auditory multimodal judge via OpenRouter or Azure OpenAI."""
 
 from __future__ import annotations
 
 import base64
 import json
-import os
 import re
 import urllib.error
 import urllib.request
@@ -14,8 +13,9 @@ from pathlib import Path
 from voxcpm_narrate.harness.judge import (
     default_audio_judge_model,
     default_llm_api_key,
-    default_llm_base_url,
+    default_llm_provider,
     fetch_openrouter_models,
+    chat_completion_request,
 )
 
 AUDIO_JUDGE_SYSTEM = """あなたは日本語ナレーション音声の聴覚品質レビューアです。
@@ -73,7 +73,7 @@ def _extract_message_content(body: dict) -> str:
     try:
         content = body["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
-        raise AudioJudgeError(f"Unexpected OpenRouter response shape: {exc}") from exc
+        raise AudioJudgeError(f"Unexpected chat-completion response shape: {exc}") from exc
 
     if isinstance(content, list):
         parts: list[str] = []
@@ -138,28 +138,34 @@ def judge_audio_with_openrouter(
     model: str | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
+    provider: str | None = None,
     timeout_sec: float = 120.0,
 ) -> AudioJudgeResult:
-    """Pattern B: send wav/mp3 audio + text to an audio-capable OpenRouter model."""
-    resolved_model = (model or default_audio_judge_model()).strip()
+    """Send wav/mp3 audio + text to the selected provider's audio deployment."""
+    resolved_provider = provider or default_llm_provider()
+    resolved_model = (model or default_audio_judge_model(resolved_provider)).strip()
+    if not resolved_model:
+        raise AudioJudgeError("音声評価に使うモデルまたは Azure デプロイ名を指定してください")
 
-    resolved_key = (api_key if api_key is not None else default_llm_api_key()).strip()
+    resolved_key = (api_key if api_key is not None else default_llm_api_key(resolved_provider)).strip()
     if not resolved_key:
-        raise AudioJudgeError("OpenRouter API key is required for Pattern B")
+        raise AudioJudgeError("音声評価には選択したプロバイダーの API キーが必要です")
 
-    catalog = fetch_openrouter_models(api_key=resolved_key, base_url=base_url)
-    if not any(m["id"] == resolved_model and m.get("supportsAudio") for m in catalog):
-        raise AudioJudgeError(
-            "選択したモデルの音声入力対応を確認できませんでした。モデル一覧を更新してください"
-        )
+    if resolved_provider == "openrouter":
+        catalog = fetch_openrouter_models(api_key=resolved_key, base_url=base_url)
+        if not any(m["id"] == resolved_model and m.get("supportsAudio") for m in catalog):
+            raise AudioJudgeError(
+                "選択したモデルの音声入力対応を確認できませんでした。モデル一覧を更新してください"
+            )
 
     path = Path(audio_path)
     if not path.is_file():
         raise AudioJudgeError(f"Audio file not found: {path}")
 
     audio_format = detect_audio_format(path)
+    if resolved_provider == "azure" and path.stat().st_size > 20 * 1024 * 1024:
+        raise AudioJudgeError("Azure OpenAI の音声入力は 20 MB 以下にしてください")
     audio_b64 = encode_audio_base64(path)
-    root = (base_url or default_llm_base_url()).rstrip("/")
 
     user_text = (
         f"元のテキスト: 「{original_text}」\n"
@@ -167,7 +173,6 @@ def judge_audio_with_openrouter(
     )
     payload = {
         "model": resolved_model,
-        "temperature": 0.2,
         "messages": [
             {"role": "system", "content": AUDIO_JUDGE_SYSTEM},
             {
@@ -185,31 +190,25 @@ def judge_audio_with_openrouter(
             },
         ],
     }
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {resolved_key}",
-        "HTTP-Referer": os.environ.get(
-            "OPENROUTER_HTTP_REFERER", "https://github.com/negitanu/VoxCPM-Narrate"
-        ),
-        "X-Title": "voxcpm-narrate-pattern-b",
-    }
-
-    req = urllib.request.Request(
-        f"{root}/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
+    if resolved_provider == "openrouter":
+        payload["temperature"] = 0.2
+    try:
+        req = chat_completion_request(
+            provider=resolved_provider, base_url=base_url, api_key=resolved_key,
+            payload=payload, app_title="voxcpm-narrate-pattern-b",
+        )
+    except ValueError as exc:
+        raise AudioJudgeError(str(exc)) from exc
     try:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             body = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise AudioJudgeError(f"OpenRouter HTTP {exc.code}: {detail}") from exc
+        raise AudioJudgeError(f"{resolved_provider} HTTP {exc.code}: {detail}") from exc
     except urllib.error.URLError as exc:
-        raise AudioJudgeError(f"OpenRouter unreachable: {exc}") from exc
+        raise AudioJudgeError(f"{resolved_provider} unreachable: {exc}") from exc
     except json.JSONDecodeError as exc:
-        raise AudioJudgeError(f"OpenRouter returned non-JSON body: {exc}") from exc
+        raise AudioJudgeError(f"{resolved_provider} returned non-JSON body: {exc}") from exc
 
     content = _extract_message_content(body)
     result = parse_audio_judge_json(content, original_text=original_text)

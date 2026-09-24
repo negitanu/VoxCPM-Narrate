@@ -12,7 +12,7 @@ from typing import Literal
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.background import BackgroundTask
 
 from voxcpm_narrate import __version__
@@ -22,6 +22,9 @@ from voxcpm_narrate.harness.judge import (
     default_audio_judge_model,
     default_llm_api_key,
     default_llm_model,
+    default_llm_provider,
+    default_provider_base_url,
+    azure_v1_base_url,
     fetch_openrouter_models,
 )
 from voxcpm_narrate.synthesize import prepare_reference_wav
@@ -70,7 +73,20 @@ class Config(Validated):
     improve_asr: bool = False
     improve_llm: bool = False
     improve_rounds: int = Field(default=3, ge=0, le=6)
-    llm_model: str = Field(default_factory=default_llm_model, min_length=1, max_length=200)
+    llm_provider: Literal["openrouter", "azure"] = Field(default_factory=default_llm_provider)
+    llm_model: str = Field(default_factory=default_llm_model, max_length=200)
+    audio_judge_model: str = Field(default_factory=default_audio_judge_model, max_length=200)
+
+    @model_validator(mode="before")
+    @classmethod
+    def provider_defaults(cls, value):
+        if isinstance(value, dict):
+            value = dict(value)
+            provider = value.get("llm_provider") or default_llm_provider()
+            if provider in {"openrouter", "azure"}:
+                value.setdefault("llm_model", default_llm_model(provider))
+                value.setdefault("audio_judge_model", default_audio_judge_model(provider))
+        return value
 
 
 class PreviewBody(Validated):
@@ -107,7 +123,7 @@ class Operation(Validated):
 class SegmentOperation(Operation):
     expected_revision: int = Field(ge=0)
     version_id: str | None = None
-    model: str = Field(default_factory=default_audio_judge_model, max_length=200)
+    model: str = Field(default="", max_length=200)
 
 
 class DictionaryBody(Validated):
@@ -171,9 +187,15 @@ def health():
 @app.get("/api/llm/settings")
 def settings():
     return dict(
-        default_model=default_llm_model(),
-        default_audio_model=default_audio_judge_model(),
-        api_key_configured=bool(default_llm_api_key()),
+        default_model=default_llm_model("openrouter"),
+        default_audio_model=default_audio_judge_model("openrouter"),
+        default_provider=default_llm_provider(),
+        api_key_configured=bool(default_llm_api_key("openrouter")),
+        openrouter_api_key_configured=bool(default_llm_api_key("openrouter")),
+        azure_api_key_configured=bool(default_llm_api_key("azure")),
+        azure_endpoint_configured=bool(default_provider_base_url("azure")),
+        azure_text_deployment=default_llm_model("azure"),
+        azure_audio_deployment=default_audio_judge_model("azure"),
         suggested_models=[m for m in OPENROUTER_MODELS if m.get('supportsAudio') is True],
     )
 
@@ -181,7 +203,7 @@ def settings():
 @app.get("/api/llm/models")
 def models(x_api_key: str | None = Header(default=None)):
     try:
-        items = fetch_openrouter_models(api_key=x_api_key or default_llm_api_key())
+        items = fetch_openrouter_models(api_key=x_api_key or default_llm_api_key("openrouter"))
     except Exception as exc:
         raise HTTPException(
             502, "モデル一覧を取得できませんでした。接続とキーを確認してください"
@@ -426,8 +448,14 @@ def generate(jid: str, body: Operation):
                 raise ValueError("生成するセグメントを選択してください（重複不可）")
             for sid in body.segment_ids:
                 segment(job, sid)
-        if job["config"]["improve_llm"] and not (body.api_key or default_llm_api_key()):
-            raise ValueError("LLM 評価には API キーが必要です")
+        if job["config"]["improve_llm"]:
+            provider = job["config"].get("llm_provider", "openrouter")
+            if not job["config"].get("llm_model"):
+                raise ValueError("LLM 評価に使うモデルまたは Azure デプロイ名を指定してください")
+            if not (body.api_key or default_llm_api_key(provider)):
+                raise ValueError("LLM 評価には選択したプロバイダーの API キーが必要です")
+            if provider == "azure":
+                azure_v1_base_url(default_provider_base_url("azure"))
         reference_path = job["config"].get("reference_audio")
         if reference_path and service._reference_audio(jid, job["config"]) is None:
             raise ValueError("保存された参照音声が見つかりません")
@@ -540,8 +568,13 @@ def audio_judge(jid: str, sid: str, body: SegmentOperation):
     def validate(job):
         validate_segment(sid, body)(job)
         version(segment(job, sid))
-        if not (body.api_key or default_llm_api_key()):
-            raise ValueError("音声評価には OpenRouter API キーが必要です")
+        provider = job["config"].get("llm_provider", "openrouter")
+        if not (body.api_key or default_llm_api_key(provider)):
+            raise ValueError("音声評価には選択したプロバイダーの API キーが必要です")
+        if provider == "azure":
+            azure_v1_base_url(default_provider_base_url("azure"))
+        if not (body.model or job["config"].get("audio_judge_model") or default_audio_judge_model(provider)):
+            raise ValueError("音声評価に使うデプロイ名を指定してください")
 
     return public(
         manager.submit(

@@ -42,6 +42,23 @@ class StudioTests(unittest.TestCase):
             self.assertEqual(self.client.get('/api/llm/models').json()['models'],
                              [{'id': 'audio', 'supportsAudio': True}])
 
+    def test_azure_production_keeps_provider_and_validates_connection(self):
+        cfg = {"llm_provider": "azure", "llm_model": "text-deployment",
+               "audio_judge_model": "audio-deployment", "improve_llm": True}
+        with patch.dict("os.environ", {"AZURE_OPENAI_ENDPOINT": "",
+                                     "AZURE_OPENAI_API_KEY": ""}):
+            response = self.client.post("/api/jobs", data={"script": "本文です。",
+                                                       "config": json.dumps(cfg)})
+            self.assertEqual(response.status_code, 200, response.text)
+            job = response.json()
+            self.assertEqual(job["config"]["llm_provider"], "azure")
+            self.assertEqual(job["config"]["audio_judge_model"], "audio-deployment")
+            url = f"/api/jobs/{job['id']}/generate"
+            self.assertEqual(self.client.post(url, json={"request_id": "no-key"}).status_code, 400)
+            self.assertEqual(self.client.post(url, json={"request_id": "no-endpoint",
+                                                         "api_key": "ephemeral-key"}).status_code, 400)
+        self.assertNotIn("ephemeral-key", json.dumps(self.manager.get(job["id"])))
+
     def test_registered_candidates_keep_filter_category(self):
         job = self.create('2026年に東京支社でAIを使います。')
         self.manager.mutate(job['id'], lambda j: j.update(dictionary={'2026年': 'にせんにじゅうろくねん', 'AI': 'エーアイ'}))
@@ -791,6 +808,23 @@ class StudioTests(unittest.TestCase):
             saved["segments"][0]["feedback"]["version_id"], saved["segments"][0]["accepted"]
         )
         self.assertNotIn("secret", json.dumps(saved))
+
+    def test_azure_audio_feedback_uses_saved_deployment(self):
+        cfg = {"llm_provider": "azure", "llm_model": "",
+               "audio_judge_model": "audio-deployment"}
+        created = self.client.post("/api/jobs", data={"script": "本文です。",
+                                                      "config": json.dumps(cfg)}).json()
+        job = self.run_all(created["id"])
+        sid = job["segments"][0]["id"]
+        from voxcpm_narrate.harness.audio_judge import AudioJudgeResult
+
+        with patch("voxcpm_narrate.web.service.judge_audio_with_openrouter",
+                   return_value=AudioJudgeResult("自然", "本文", "Natural", "audio-deployment")) as judge:
+            self.service.audio_judge(job["id"], sid, "", "ephemeral-key")
+        self.assertEqual(judge.call_args.kwargs["provider"], "azure")
+        self.assertEqual(judge.call_args.kwargs["model"], "audio-deployment")
+        self.assertEqual(judge.call_args.kwargs["api_key"], "ephemeral-key")
+        self.assertNotIn("ephemeral-key", json.dumps(self.manager.get(job["id"])))
 
     def test_model_is_reused(self):
         with patch("voxcpm_narrate.web.service.load_model", return_value=FakeModel()) as load:

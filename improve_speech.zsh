@@ -38,9 +38,10 @@ SEGMENT_IDS=()
 USE_ASR=0
 ASR_DEVICE="cpu"
 USE_LLM=0
-LLM_BASE_URL="${OPENROUTER_BASE_URL:-${VOXCPM_LLM_BASE_URL:-https://openrouter.ai/api/v1}}"
-LLM_MODEL="${OPENROUTER_MODEL:-${VOXCPM_LLM_MODEL:-openai/gpt-4o-mini}}"
-LLM_API_KEY="${OPENROUTER_API_KEY:-${VOXCPM_LLM_API_KEY:-}}"
+LLM_PROVIDER="${VOXCPM_LLM_PROVIDER:-openrouter}"
+LLM_BASE_URL=""
+LLM_MODEL=""
+LLM_API_KEY=""
 ONLY_AWKWARD=1
 NO_CONTROL=0
 NORMALIZE=1
@@ -63,10 +64,11 @@ Options:
   --segment-id ID         Target specific segment (repeatable)
   --asr                   Enable SenseVoice ASR + CER
   --asr-device NAME       ASR device (default: cpu)
-  --llm-judge             Enable OpenRouter LLM judge
-  --llm-base-url URL      default https://openrouter.ai/api/v1
-  --llm-model NAME        default openai/gpt-4o-mini (or OPENROUTER_MODEL)
-  --llm-api-key KEY       default OPENROUTER_API_KEY
+  --llm-judge             Enable OpenRouter or Azure OpenAI LLM judge
+  --llm-provider NAME     openrouter|azure (default: VOXCPM_LLM_PROVIDER or openrouter)
+  --llm-base-url URL      Azure resource URL or OpenRouter API URL
+  --llm-model NAME        OpenRouter model ID or Azure deployment name
+  --llm-api-key KEY       default: selected provider's environment variable
   --device NAME           auto|cpu|mps|cuda
   --control TEXT          Base style control for retries
   --no-control
@@ -93,6 +95,7 @@ while [[ $# -gt 0 ]]; do
     --asr) USE_ASR=1; shift ;;
     --asr-device) ASR_DEVICE="$2"; shift 2 ;;
     --llm-judge) USE_LLM=1; shift ;;
+    --llm-provider) LLM_PROVIDER="$2"; shift 2 ;;
     --llm-base-url) LLM_BASE_URL="$2"; shift 2 ;;
     --llm-model) LLM_MODEL="$2"; shift 2 ;;
     --llm-api-key) LLM_API_KEY="$2"; shift 2 ;;
@@ -140,11 +143,19 @@ if (( NO_CONTROL )); then ARGS+=(--no-control); else ARGS+=(--control "$CONTROL"
 if (( ! ONLY_AWKWARD )); then ARGS+=(--all); fi
 if (( USE_ASR )); then ARGS+=(--asr --asr-device "$ASR_DEVICE"); fi
 if (( USE_LLM )); then
-  if [[ -z "$LLM_API_KEY" ]]; then
-    echo "OPENROUTER_API_KEY (or --llm-api-key) is required when --llm-judge is set" >&2
+  case "$LLM_PROVIDER" in
+    azure) KEY_FROM_ENV="${AZURE_OPENAI_API_KEY:-}" ;;
+    openrouter) KEY_FROM_ENV="${OPENROUTER_API_KEY:-${VOXCPM_LLM_API_KEY:-}}" ;;
+    *) echo "--llm-provider must be openrouter or azure" >&2; exit 1 ;;
+  esac
+  if [[ -z "$LLM_API_KEY" && -z "$KEY_FROM_ENV" ]]; then
+    echo "The selected provider's API key (or --llm-api-key) is required with --llm-judge" >&2
     exit 1
   fi
-  ARGS+=(--llm-judge --llm-base-url "$LLM_BASE_URL" --llm-model "$LLM_MODEL" --llm-api-key "$LLM_API_KEY")
+  ARGS+=(--llm-judge --llm-provider "$LLM_PROVIDER")
+  if [[ -n "$LLM_BASE_URL" ]]; then ARGS+=(--llm-base-url "$LLM_BASE_URL"); fi
+  if [[ -n "$LLM_MODEL" ]]; then ARGS+=(--llm-model "$LLM_MODEL"); fi
+  if [[ -n "$LLM_API_KEY" ]]; then ARGS+=(--llm-api-key "$LLM_API_KEY"); fi
 fi
 if [[ -n "$REFERENCE" ]]; then ARGS+=(--reference "$REFERENCE"); fi
 if [[ -n "$LIMIT" ]]; then ARGS+=(--limit "$LIMIT"); fi

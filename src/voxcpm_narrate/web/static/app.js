@@ -33,13 +33,17 @@
   const busy = () => job && activeStates.has(job.status);
   const audioUrl = (sid, vid) => `/api/jobs/${job.id}/segments/${encodeURIComponent(sid)}?version_id=${encodeURIComponent(vid)}`;
   const request = () => ({request_id:crypto.randomUUID(),api_key:$("api-key").value.trim()});
+  const provider = () => job?.config?.llm_provider || $("llm-provider").value;
+  const audioJudgeModel = () => provider() === "azure" ? $("azure-audio-deployment").value.trim() : $("llm-model").value;
   const config = () => ({device:$("device").value,control:$("control").value,max_chars:+$("max-chars").value,
     convert_numbers:$("convert-numbers").checked,
     number_reading_style:$("number-reading-style").value,
     pace_mode:$("pace-mode").value,target_mora_rate:+$("target-mora-rate").value,
     cfg_value:+$("cfg").value,timesteps:+$("timesteps").value,seed:+$("seed").value,
     improve:$("improve").checked,improve_asr:$("asr").checked,improve_llm:$("llm").checked,
-    improve_rounds:+$("rounds").value,llm_model:$("llm-model").value || settings.default_model});
+    improve_rounds:+$("rounds").value,llm_provider:$("llm-provider").value,
+    llm_model:$("llm-provider").value === "azure" ? ($("azure-text-deployment").value.trim() || $("azure-audio-deployment").value.trim()) : $("llm-model").value || settings.default_model,
+    audio_judge_model:$("llm-provider").value === "azure" ? $("azure-audio-deployment").value.trim() : $("llm-model").value});
 
   async function refreshLibrary() {
     const trash = $("show-trash").checked;
@@ -94,6 +98,16 @@
     const data = await api(`/api/jobs/${encodeURIComponent(id)}`);
     sequence = []; $("audio").pause(); checked.clear(); selectedId = data.segments[0]?.id; renderedId = null;
     job = data; history.replaceState(null,"",`?job=${id}`);
+    const savedProvider=data.config.llm_provider || "openrouter";
+    if($("llm-provider").value !== savedProvider)$("api-key").value="";
+    $("llm-provider").value=savedProvider;
+    if(savedProvider === "azure") {
+      $("azure-text-deployment").value=data.config.llm_model || "";
+      $("azure-audio-deployment").value=data.config.audio_judge_model || settings.azure_audio_deployment || "";
+    } else if([...$("llm-model").options].some(o=>o.value===data.config.audio_judge_model)) {
+      $("llm-model").value=data.config.audio_judge_model;
+    }
+    updateProviderUI();
     $("setup").classList.add("hidden"); $("studio").classList.remove("hidden");
     $("dictionary").value = Object.entries(data.dictionary).map(([k,v]) => `${k}=${v}`).join("\n");
     $("pronunciation-candidates").replaceChildren();
@@ -238,7 +252,7 @@
       const local=readLocal(draftKey(job.id,seg.id));
       $("resolve-edit").classList.toggle("hidden",!local || local.revision===seg.revision || (local.base && JSON.stringify(local.base)===JSON.stringify(seg.draft)));
       renderVersions(seg);
-      $("judge").disabled = busy() || !seg.accepted || !$("llm-model").value;
+      $("judge").disabled = busy() || !seg.accepted || !audioJudgeModel();
       const feedback = seg.feedback?.version_id === seg.accepted ? seg.feedback : null;
       $("feedback-text").textContent = feedback?.feedback || "";
       $("suggestion").classList.toggle("hidden",!feedback);
@@ -261,6 +275,7 @@
   let setupRevision = 0;
   $("new-job").onclick = () => {
     closeRename(); job=null;selectedId=null;renderedId=null;sequence=[];
+    updateProviderUI();
     setupRevision++;
     $("title").value="";$("script").value="";$("script-file").value="";$("preview-list").replaceChildren();
     saveSetup();
@@ -297,7 +312,7 @@
     await saveEdit();
   });
   async function generate(ids) {
-    if(job.config.improve_llm && !$("api-key").value && !settings.api_key_configured) throw new Error("外部評価の API キーを入力してください");
+    if(job.config.improve_llm && !$("api-key").value && !providerKeyConfigured()) throw new Error("選択したプロバイダーの API キーを入力してください");
     await saveEdit();
     const pendingLocal = job.segments.some(s => (ids ? ids.includes(s.id) : !s.accepted) && readLocal(draftKey(job.id,s.id)));
     if(pendingLocal) throw new Error("選択箇所に未保存の編集があります。各箇所で編集を保存してください。");
@@ -314,7 +329,7 @@
   $("generate-selected").onclick = () => action(async()=>{if(!checked.size) throw new Error("一覧のチェックボックスで試聴箇所を選択してください");await generate([...checked]);});
   $("cancel").onclick = () => action(async()=>render(await post(`/api/jobs/${job.id}/cancel`)));
   $("regenerate").onclick = () => action(async()=>{await saveEdit();const seg=current();render(await post(`/api/jobs/${job.id}/segments/${seg.id}/regenerate`,{...request(),expected_revision:seg.revision}));});
-  $("judge").onclick = () => action(async()=>{const seg=current();render(await post(`/api/jobs/${job.id}/segments/${seg.id}/audio-judge`,{...request(),expected_revision:seg.revision,model:$("llm-model").value}));});
+  $("judge").onclick = () => action(async()=>{const seg=current();render(await post(`/api/jobs/${job.id}/segments/${seg.id}/audio-judge`,{...request(),expected_revision:seg.revision,model:audioJudgeModel()}));});
   $("use-suggestion").onclick = () => { const feedback=current()?.feedback;if(!feedback)return;$("edit-text").value=feedback.revised_text;$("edit-control").value=feedback.voice_design_prompt;trackEdit();notice("提案を編集欄に取り込みました。元の本文と比べ、意味や固有名詞を確認してください。"); };
   $("save-dictionary").onclick = () => action(async()=>{
     const entries={};for(const line of $("dictionary").value.split("\n").filter(l=>l.trim())) {const index=line.indexOf("=");if(index<1)throw new Error("読み辞書は「表記=読み」の形式で入力してください");entries[line.slice(0,index).trim()]=line.slice(index+1).trim();}
@@ -432,6 +447,22 @@
     });};
   }
   $("clear-key").onclick = () => {$("api-key").value="";localStorage.removeItem("voxcpm.openrouter.api_key");notice("入力キーと旧 localStorage キーを消去しました");};
+  const providerKeyConfigured = () => provider() === "azure" ? settings.azure_api_key_configured : settings.openrouter_api_key_configured;
+  function updateProviderUI() {
+    const azure=provider() === "azure";
+    $("llm-provider").disabled=!!job;
+    $("provider-key-label").firstChild.textContent=azure ? "Azure OpenAI API キー" : "OpenRouter API キー";
+    $("openrouter-model-field").classList.toggle("hidden",azure);
+    $("azure-fields").classList.toggle("hidden",!azure);
+    $("azure-text-deployment").disabled=!!job;
+    $("refresh-models").classList.toggle("hidden",azure);
+    $("key-status").textContent=azure
+      ? `${settings.azure_endpoint_configured ? "Azure エンドポイント設定済み" : "サーバーに AZURE_OPENAI_ENDPOINT を設定してください"} · ${providerKeyConfigured() ? "サーバーの API キーを利用できます" : "API キーを入力してください"}`
+      : providerKeyConfigured() ? "サーバーの API キーを利用できます" : "外部評価を使う場合のみキーが必要です";
+    $("feedback-provider-note").textContent=`採用中の音声と本文を${azure ? "Azure OpenAI Service" : "OpenRouter"}に送信します。提案は自動で採用されません（制作あたり最大50回）。`;
+  }
+  $("llm-provider").onchange=()=>{$("api-key").value="";updateProviderUI();};
+  $("azure-audio-deployment").oninput=()=>{if(job)$("judge").disabled=busy() || !current()?.accepted || !audioJudgeModel();};
   function fillModels(models) {
     const previous=$("llm-model").value, audioModels=models.filter(m=>m.supportsAudio === true);
     $("llm-model").replaceChildren(...audioModels.map(m=>{const o=document.createElement("option");o.value=m.id;o.textContent=`${m.name || m.id} · 音声入力対応`;return o;}));
@@ -439,7 +470,7 @@
     else if(audioModels.some(m=>m.id===settings.default_audio_model))$("llm-model").value=settings.default_audio_model;
     if(!audioModels.length){const o=document.createElement("option");o.value="";o.textContent="音声入力対応モデルがありません";$("llm-model").append(o);}
     $("llm-model").disabled=!audioModels.length;
-    $("judge").disabled=!!busy() || !current()?.accepted || !audioModels.length;
+    $("judge").disabled=!!busy() || !current()?.accepted || !audioJudgeModel();
   }
   $("refresh-models").onclick = () => action(async()=>{const data=await api("/api/llm/models",{headers:{"X-API-Key":$("api-key").value.trim()}});fillModels(data.models);notice(`${data.models.length} モデルを取得しました`);});
   $("import-run").onclick = () => action(async()=>{if(!$("legacy-runs").value)throw new Error("取り込める run がありません");const data=await post("/api/import",{run:$("legacy-runs").value});await openJob(data.id);notice("元のファイルを保持して取り込みました");});
@@ -447,7 +478,10 @@
   async function init() {
     const saved=readLocal("voxcpm.setup");if(saved){$("title").value=saved.title;$("script").value=saved.script;$("mode").value=saved.mode;}
     settings=await api("/api/llm/settings");fillModels(settings.suggested_models);
-    $("key-status").textContent=settings.api_key_configured?"サーバーの API キーを利用できます":"外部評価を使う場合のみキーが必要です";
+    $("llm-provider").value=settings.default_provider || "openrouter";
+    $("azure-text-deployment").value=settings.azure_text_deployment || "";
+    $("azure-audio-deployment").value=settings.azure_audio_deployment || "";
+    updateProviderUI();
     if(localStorage.getItem("voxcpm.openrouter.api_key"))notice("以前保存された API キーがあります。外部評価設定の「旧保存キーを消去」で削除できます。");
     const health=await api("/api/health");$("health").textContent=health.ok?"接続中":"接続エラー";
     await refreshLibrary();const legacy=await api("/api/legacy-runs");$("legacy-runs").replaceChildren(...legacy.runs.map(run=>{const o=document.createElement("option");o.value=run;o.textContent=run;return o;}));

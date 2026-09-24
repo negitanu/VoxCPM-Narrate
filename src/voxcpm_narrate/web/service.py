@@ -20,7 +20,9 @@ from voxcpm_narrate.extract import load_jobs
 from voxcpm_narrate.harness.audio_judge import AUDIO_JUDGE_SYSTEM, judge_audio_with_openrouter
 from voxcpm_narrate.harness.asr import AsrTranscriber
 from voxcpm_narrate.harness.content_gate import GATE_VERSION, inspect_audio
-from voxcpm_narrate.harness.judge import LlmJudge, default_llm_api_key
+from voxcpm_narrate.harness.judge import (
+    LlmJudge, default_audio_judge_model, default_llm_api_key, default_provider_base_url,
+)
 from voxcpm_narrate.harness.loop import evaluate_segment
 from voxcpm_narrate.harness.strategies import GenParams, build_strategies
 from voxcpm_narrate.pronunciation import (
@@ -517,9 +519,11 @@ class ProductionService:
     def improve(self, jid, ids, api_key=""):
         job = self.manager.get(jid)
         cfg = job["config"]
+        provider = cfg.get("llm_provider", "openrouter")
         asr = self._content_asr if cfg.get("improve_asr") else None
         judge = (
-            LlmJudge(model=cfg["llm_model"], api_key=api_key or default_llm_api_key())
+            LlmJudge(provider=provider, model=cfg["llm_model"],
+                     api_key=api_key or default_llm_api_key(provider))
             if cfg.get("improve_llm")
             else None
         )
@@ -550,10 +554,13 @@ class ProductionService:
 
     def audio_judge(self, jid, sid, model, api_key):
         job = self.manager.get(jid)
+        provider = job["config"].get("llm_provider", "openrouter")
+        model = model or job["config"].get("audio_judge_model") or default_audio_judge_model(provider)
         seg = segment(job, sid)
         v = version(seg)
         key = hashlib.sha256(
-            (v["sha256"] + v["text"] + model + AUDIO_JUDGE_SYSTEM).encode()
+            (v["sha256"] + v["text"] + provider + default_provider_base_url(provider)
+             + model + AUDIO_JUDGE_SYSTEM).encode()
         ).hexdigest()
         cache = self.manager.job_dir(jid) / "evaluations" / (key + ".json")
         if cache.is_file():
@@ -571,7 +578,8 @@ class ProductionService:
                 audio_path=self.audio_path(jid, sid),
                 original_text=v["text"],
                 model=model,
-                api_key=api_key or default_llm_api_key(),
+                api_key=api_key or default_llm_api_key(provider),
+                provider=provider,
             ).to_dict()
             if not result.get("parse_fallback"):
                 write_json(cache, result)

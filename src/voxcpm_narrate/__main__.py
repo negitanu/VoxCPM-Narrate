@@ -9,7 +9,9 @@ from pathlib import Path
 
 from voxcpm_narrate.console import ensure_rich_tqdm, log, log_error
 from voxcpm_narrate.extract import detect_input_mode, load_jobs
-from voxcpm_narrate.harness.judge import default_llm_api_key, default_llm_base_url, default_llm_model
+from voxcpm_narrate.harness.judge import (
+    default_llm_api_key, default_llm_model, default_llm_provider, default_provider_base_url,
+)
 from voxcpm_narrate.harness.loop import run_improve_loop
 from voxcpm_narrate.synthesize import prepare_reference_wav, synthesize
 
@@ -116,22 +118,26 @@ def build_parser() -> argparse.ArgumentParser:
     imp.add_argument(
         "--llm-judge",
         action="store_true",
-        help="Enable OpenRouter (OpenAI-compatible) LLM judge",
+        help="Enable OpenRouter or Azure OpenAI LLM judge",
+    )
+    imp.add_argument(
+        "--llm-provider", choices=["openrouter", "azure"], default=default_llm_provider(),
+        help="LLM provider (default: VOXCPM_LLM_PROVIDER or openrouter)",
     )
     imp.add_argument(
         "--llm-base-url",
-        default=default_llm_base_url(),
-        help="OpenAI-compatible base URL (default: OpenRouter)",
+        default=None,
+        help="Provider base URL (Azure resource endpoint or /openai/v1 URL)",
     )
     imp.add_argument(
         "--llm-model",
-        default=default_llm_model(),
-        help="Model id (default: openai/gpt-4o-mini or OPENROUTER_MODEL)",
+        default=None,
+        help="Model id or Azure text deployment name",
     )
     imp.add_argument(
         "--llm-api-key",
-        default=default_llm_api_key(),
-        help="API key (default: OPENROUTER_API_KEY)",
+        default=None,
+        help="API key (default: selected provider's environment variable)",
     )
     _add_common_synth_args(imp)
 
@@ -276,9 +282,10 @@ def cmd_improve(args: argparse.Namespace) -> int:
             use_asr=args.asr,
             asr_device=args.asr_device,
             use_llm=args.llm_judge,
-            llm_base_url=args.llm_base_url,
-            llm_model=args.llm_model,
-            llm_api_key=args.llm_api_key,
+            llm_provider=args.llm_provider,
+            llm_base_url=args.llm_base_url or default_provider_base_url(args.llm_provider),
+            llm_model=args.llm_model or default_llm_model(args.llm_provider),
+            llm_api_key=args.llm_api_key or default_llm_api_key(args.llm_provider),
         )
     except Exception as exc:  # noqa: BLE001 - CLI boundary
         log_error(f"improve failed: {exc}")
