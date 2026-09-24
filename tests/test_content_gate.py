@@ -127,33 +127,84 @@ class PublishingTests(unittest.TestCase):
     def test_retries_bounded_and_manual_adoption_blocked(self):
         with patch('voxcpm_narrate.web.service.inspect_audio',
                    side_effect=lambda *a: self.result(False)) as check:
-            with self.assertRaises(ValueError):
-                self.service.generate(self.jid)
+            message = self.service.generate(self.jid)
             job = self.manager.get(self.jid)
+            self.assertIn('音声検査未合格 1 件', message)
             self.assertEqual(check.call_count, 3)
             self.assertEqual(self.generate_mock.call_count, 3)
             self.assertTrue(all(call.kwargs['retry_badcase'] is False
                                 for call in self.generate_mock.call_args_list))
             self.assertIsNone(job['segments'][0]['accepted'])
             self.assertIsNone(job['export'])
+            self.assertEqual(job['segments'][0]['inspection_issue'], '不一致')
             with self.assertRaises(ValueError):
                 self.service.adopt(self.jid, self.sid, job['segments'][0]['versions'][0]['id'])
 
     def test_unavailable_stops_without_tts_retries(self):
         with patch('voxcpm_narrate.web.service.inspect_audio', side_effect=RuntimeError('offline')):
-            with self.assertRaises(ValueError):
-                self.service.generate(self.jid)
+            self.service.generate(self.jid)
         seg = self.manager.get(self.jid)['segments'][0]
         self.assertEqual(len(seg['versions']), 1)
         self.assertTrue(seg['versions'][0]['content_check']['unavailable'])
+
+    def test_retry_after_failed_inspection_clears_review_issue(self):
+        with patch('voxcpm_narrate.web.service.inspect_audio',
+                   side_effect=lambda *a: self.result(False)):
+            self.service.generate(self.jid)
+        with patch('voxcpm_narrate.web.service.inspect_audio',
+                   side_effect=lambda *a: self.result(True)):
+            self.service.generate(self.jid)
+        job = self.manager.get(self.jid)
+        self.assertIsNotNone(job['segments'][0]['accepted'])
+        self.assertIsNone(job['segments'][0]['inspection_issue'])
+        self.assertIsNotNone(job['export'])
+
+    def test_failed_inspection_continues_to_next_segment(self):
+        job = self.service.create('batch', '最初です。\n\n次です。', 'plain', Config().model_dump())
+        first, second = [seg['id'] for seg in job['segments']]
+
+        def inspect(path, *_args):
+            return self.result(path.parent.name != first)
+
+        with patch('voxcpm_narrate.web.service.inspect_audio', side_effect=inspect):
+            self.manager.submit(job['id'], 'generate', self.service.generate, request_id='batch')
+            self.manager._queue.join()
+        saved = self.manager.get(job['id'])
+        self.assertEqual(saved['status'], 'done')
+        self.assertIn('音声検査未合格 1 件', saved['message'])
+        self.assertEqual(len(saved['segments'][0]['versions']), 3)
+        self.assertIsNone(saved['segments'][0]['accepted'])
+        self.assertIsNotNone(saved['segments'][1]['accepted'])
+        self.assertIsNone(saved['export'])
+
+    def test_regenerate_all_inspects_every_segment_before_holding_adoption(self):
+        job = self.service.create('batch', '最初です。\n\n次です。', 'plain', Config().model_dump())
+        with patch('voxcpm_narrate.web.service.inspect_audio',
+                   side_effect=lambda *a: self.result(True)):
+            self.service.generate(job['id'])
+        original = self.manager.get(job['id'])
+        first = original['segments'][0]['id']
+
+        def inspect(path, *_args):
+            return self.result(path.parent.name != first)
+
+        with patch('voxcpm_narrate.web.service.inspect_audio', side_effect=inspect):
+            message = self.service.regenerate_all(job['id'])
+        saved = self.manager.get(job['id'])
+        self.assertIn('音声検査未合格 1 件', message)
+        self.assertEqual([s['accepted'] for s in saved['segments']],
+                         [s['accepted'] for s in original['segments']])
+        self.assertEqual(saved['export'], original['export'])
+        self.assertEqual(len(saved['segments'][0]['versions']), 4)
+        self.assertEqual(len(saved['segments'][1]['versions']), 2)
 
     def test_failed_regeneration_preserves_existing_export(self):
         with patch('voxcpm_narrate.web.service.inspect_audio', side_effect=lambda *a: self.result(True)):
             self.service.generate(self.jid)
         original = self.manager.get(self.jid)
         with patch('voxcpm_narrate.web.service.inspect_audio', side_effect=lambda *a: self.result(False)):
-            with self.assertRaises(ValueError):
-                self.service.regenerate(self.jid, self.sid)
+            message = self.service.regenerate(self.jid, self.sid)
+        self.assertIn('音声検査未合格', message)
         job = self.manager.get(self.jid)
         self.assertEqual(job['export'], original['export'])
         self.assertEqual(job['segments'][0]['accepted'], original['segments'][0]['accepted'])

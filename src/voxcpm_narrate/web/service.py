@@ -84,6 +84,10 @@ def check_revision(seg: dict, expected: int) -> None:
         raise Conflict("別の操作で内容が変更されました。最新状態を読み込んでください")
 
 
+class ContentCheckFailed(ValueError):
+    """A saved audio candidate did not pass inspection; other work may continue."""
+
+
 class ProductionService:
     def __init__(self, manager: JobManager):
         self.manager = manager
@@ -351,6 +355,7 @@ class ProductionService:
             v = self._generate(jid, sid, **kwargs)
             report = self.verify_content(jid, sid, v["id"])
             if report["passed"]:
+                self.manager.mutate(jid, lambda j: segment(j, sid).update(inspection_issue=None))
                 return v
             if report.get("unavailable"):
                 break
@@ -359,9 +364,10 @@ class ProductionService:
                 self.manager.update(jid, message=f"{sid}: 原稿との不一致により再生成 ({attempt + 1}/2)")
         message = "音声検査に合格しませんでした。候補の検査結果を確認してください"
         self.manager.mutate(jid, lambda j: segment(j, sid).update(
-            status="ready" if segment(j, sid)["accepted"] else "pending"))
+            status="ready" if segment(j, sid)["accepted"] else "pending",
+            inspection_issue=" / ".join(report.get("reasons") or [message])))
         self.manager.update(jid, message=message)
-        raise ValueError(message)
+        raise ContentCheckFailed(message)
 
     def _require_content(self, jid, sid, vid):
         report = self.verify_content(jid, sid, vid)
@@ -433,6 +439,7 @@ class ProductionService:
             status="ready",
             revision=seg["revision"] + 1,
             error=None,
+            inspection_issue=None,
             draft={key: v.get(key) for key in ("text", "reading", "control", "pause_before_sec", "convert_numbers", "number_reading_style")},
             feedback=None,
         )
@@ -448,30 +455,45 @@ class ProductionService:
             else [s["id"] for s in job["segments"] if not s["accepted"]]
         )
         newly_generated = []
+        failed = []
         for sid in ids:
             self.manager.checkpoint(jid)
             seg = segment(self.manager.get(jid), sid)
             self.manager.mutate(jid, lambda j: segment(j, sid).update(status="running", error=None))
-            v = self._checked_generate(jid, sid)
+            try:
+                v = self._checked_generate(jid, sid)
+            except ContentCheckFailed:
+                failed.append(sid)
+                continue
             # Existing audio is never replaced just by pressing Generate.
             if not seg["accepted"]:
                 self.adopt(jid, sid, v["id"])
                 newly_generated.append(sid)
             self.manager.checkpoint(jid)
+        self.manager.checkpoint(jid)
         if job["config"].get("improve"):
             self.improve(jid, newly_generated, api_key)
         current = self.manager.get(jid)
         self.manager.update(jid, export=self._build_export(current))
+        if failed:
+            return f"音声検査未合格 {len(failed)} 件（{', '.join(failed)}）。候補をまとめて確認してください。"
 
     def regenerate_all(self, jid):
         ids = [s["id"] for s in self.manager.get(jid)["segments"]]
         candidates = {}
+        failed = []
         for index, sid in enumerate(ids, 1):
             self.manager.checkpoint(jid)
             self.manager.update(jid, regeneration_progress={"current": index - 1, "total": len(ids)})
-            candidates[sid] = self._checked_generate(jid, sid, seed=secrets.randbelow(2**31))
+            try:
+                candidates[sid] = self._checked_generate(jid, sid, seed=secrets.randbelow(2**31))
+            except ContentCheckFailed:
+                failed.append(sid)
             self.manager.update(jid, regeneration_progress={"current": index, "total": len(ids)})
         self.manager.checkpoint(jid)
+        if failed:
+            return (f"全候補を生成しました。音声検査未合格 {len(failed)} 件（{', '.join(failed)}）。"
+                    "一括採用は保留し、以前の音声を保持しています。")
         job = self.manager.get(jid)
         for seg in job["segments"]:
             v = candidates[seg["id"]]
@@ -490,8 +512,11 @@ class ProductionService:
         self.manager.mutate(
             jid, lambda job: segment(job, sid).update(status="regenerating", error=None)
         )
-        self._checked_generate(jid, sid, seed=secrets.randbelow(2**31))
-        self.manager.update(jid, message="候補を保存しました。試聴して採用してください")
+        try:
+            self._checked_generate(jid, sid, seed=secrets.randbelow(2**31))
+        except ContentCheckFailed:
+            return "音声検査未合格の候補を保存しました。あとでまとめて確認してください。"
+        return "候補を保存しました。試聴して採用してください。"
 
     def evaluate(self, jid, sid, vid, asr=None, judge=None):
         import soundfile as sf

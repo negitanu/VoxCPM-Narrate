@@ -273,14 +273,14 @@ class JobManager:
             try:
                 self.checkpoint(job_id)
                 self.update(job_id, status="running")
-                target(job_id)
+                completion_message = target(job_id)
                 self.update(
                     job_id,
                     status="done",
                     phase="done",
                     operation=None,
                     cancel_requested=False,
-                    message="保存しました",
+                    message=completion_message if isinstance(completion_message, str) else "保存しました",
                 )
             except Cancelled:
                 self.update(

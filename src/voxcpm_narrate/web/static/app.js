@@ -180,11 +180,12 @@
         row.append(c,b); panel.append(row);
       }
       const draftChanged = seg.accepted && ["text","reading","control","pause_before_sec","convert_numbers","number_reading_style"].some(key=>(seg.draft[key] ?? null) !== (accepted(seg)?.[key] ?? null));
-      const review = draftChanged || seg.versions.some(v => v.id !== seg.accepted && !seg.history.includes(v.id)) || accepted(seg)?.evaluation?.awkward || !!accepted(seg)?.content_check?.warnings?.length || !!seg.error;
+      const review = draftChanged || seg.versions.some(v => v.id !== seg.accepted && !seg.history.includes(v.id)) || accepted(seg)?.evaluation?.awkward || !!accepted(seg)?.content_check?.warnings?.length || !!seg.inspection_issue || !!seg.error;
       row.hidden = filter === "pending" ? !!seg.accepted : filter === "ready" ? !seg.accepted : filter === "review" ? !review : false;
       row.classList.toggle("active",seg.id === selectedId);
       row.querySelector("input").checked = checked.has(seg.id);
       row.querySelector("small").textContent = `${seg.id} · ${seg.status === "running" ? "生成中" : seg.accepted ? "採用済み" : "未生成"}${draftChanged ? " · 編集未反映" : review ? " · 要確認" : ""}`;
+      row.querySelector("small").title = seg.inspection_issue || "";
       row.querySelector("span").textContent = seg.draft.text;
     }
     for(const row of [...panel.children]) if(!job.segments.some(s => s.id === row.dataset.id)) row.remove();
@@ -212,6 +213,7 @@
       });
       const details=document.createElement("small");details.className="version-details";
       details.textContent=`${v.text} — 間 ${v.pause_before_sec}秒 / ${v.control || "話し方指定なし"}`;
+      if(gate && !gate.passed && gate.reasons?.length)details.textContent += ` — 音声検査: ${gate.reasons.join(" / ")}`;
       if (v.prepared_reading) details.textContent += ` — 生成に使用した読み: ${v.prepared_reading}`;
       if (v.speech_rate) details.textContent += ` — 話速: ${v.speech_rate.reason}（目標 ${v.speech_rate.target.toFixed(1)} モーラ/秒）`;
       if (v.speech_rate?.applied) details.textContent += ` / ${v.speech_rate.before.toFixed(1)} → ${v.speech_rate.after.toFixed(1)} モーラ/秒（${v.speech_rate.factor.toFixed(2)}倍）`;
@@ -322,7 +324,7 @@
     await saveEdit();
     if (job.segments.some(s => readLocal(draftKey(job.id,s.id)))) throw new Error("未保存の編集を各箇所で保存してください。");
     requireSavedDictionary();
-    if (!confirm(`「${job.title}」の全${job.segments.length}箇所を再生成します。全て検査に合格したら一括採用します。以前の音声は履歴に残ります。実行しますか？`)) return;
+    if (!confirm(`「${job.title}」の全${job.segments.length}箇所を再生成します。未合格があっても最後まで候補を生成し、全て合格した場合だけ一括採用します。実行しますか？`)) return;
     render(await post(`/api/jobs/${job.id}/regenerate-all`, request()));
   });
   $("generate-all").onclick = () => action(()=>generate(null));
