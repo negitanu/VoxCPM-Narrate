@@ -7,6 +7,8 @@
 <div class="shell">
 <aside class="sidebar" aria-label="制作一覧">
   <button id="new-job" class="primary">＋ 新しい制作</button>
+  <button id="import-project" type="button">プロジェクト ZIP を読み込む</button>
+  <input id="project-file" class="hidden" type="file" accept=".zip,application/zip" aria-label="読み込むプロジェクト ZIP">
   <h2>ライブラリ</h2><label class="check"><input id="show-trash" type="checkbox">ごみ箱を表示</label><button id="empty-trash" class="hidden" type="button">ごみ箱を空にする</button><nav id="library" aria-label="保存した制作"></nav>
   <details class="import"><summary>以前の生成結果を取り込む</summary><label>生成済み run<select id="legacy-runs"></select></label><button id="import-run">コピーして取り込む</button><small>元のファイルは保持します。生成条件が不明な場合は既定値を使用します。</small></details>
 </aside>
@@ -71,9 +73,10 @@
   </form>
   <div id="progress" role="progressbar" aria-label="生成済みセグメント" aria-valuemin="0" aria-valuemax="100"><div id="progress-fill"></div></div>
   <div class="progress-caption"><span id="progress-text" aria-live="polite"></span><span id="timing" class="muted"></span></div>
-  <div class="actions toolbar"><button class="primary" id="generate-all">未生成部分を生成・再開</button><button id="regenerate-all">全て再生成</button><button id="generate-selected">選択箇所を試聴生成</button><button id="cancel" class="hidden">中断する</button><button id="play-all">連続試聴</button><button id="fork-script">台本を編集して新規制作</button></div>
+  <div class="actions toolbar"><button class="primary" id="generate-all">未生成部分を生成・再開</button><button id="regenerate-all">全て再生成</button><button id="generate-selected">選択箇所を試聴生成</button><button id="cancel" class="hidden">中断する</button><button id="play-all">連続試聴</button><button id="fork-script">台本を編集して新規制作</button><button id="export-project">プロジェクト ZIP を保存</button></div>
+  <p class="muted small">プロジェクト ZIP は未生成の制作も保存できます。台本・設定・辞書・参照音声・音声候補・採用履歴を含みます。</p>
   <div class="workbench">
-    <section class="segment-list-panel" aria-label="セグメント一覧"><div class="list-heading"><h2>セグメント</h2><select id="filter" aria-label="セグメントの絞り込み"><option value="all">すべて</option><option value="pending">未生成</option><option value="review">要確認・候補あり</option><option value="ready">採用済み</option></select></div><div id="segments"></div></section>
+    <section class="segment-list-panel" aria-label="セグメント一覧"><div class="list-heading"><h2>セグメント</h2><select id="filter" aria-label="セグメントの絞り込み"><option value="all">すべて</option><option value="pending">未生成</option><option value="review">要確認・候補あり</option><option value="ready">採用済み</option></select></div><div id="segments"></div><p id="segments-empty" class="muted hidden" role="status">該当するセグメントはありません。</p></section>
     <section id="editor" class="editor" aria-label="セグメント編集">
       <div class="title-row"><h2 id="segment-title"></h2><span id="save-status" class="muted"></span></div>
       <p id="original-text" class="original"></p>

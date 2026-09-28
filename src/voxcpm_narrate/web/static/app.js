@@ -97,6 +97,7 @@
     closeRename();
     const data = await api(`/api/jobs/${encodeURIComponent(id)}`);
     sequence = []; $("audio").pause(); checked.clear(); selectedId = data.segments[0]?.id; renderedId = null;
+    $("segments").replaceChildren(); $("filter").value = "all";
     job = data; history.replaceState(null,"",`?job=${id}`);
     const savedProvider=data.config.llm_provider || "openrouter";
     if($("llm-provider").value !== savedProvider)$("api-key").value="";
@@ -181,13 +182,15 @@
       }
       const draftChanged = seg.accepted && ["text","reading","control","pause_before_sec","convert_numbers","number_reading_style"].some(key=>(seg.draft[key] ?? null) !== (accepted(seg)?.[key] ?? null));
       const review = draftChanged || seg.versions.some(v => v.id !== seg.accepted && !seg.history.includes(v.id)) || accepted(seg)?.evaluation?.awkward || !!accepted(seg)?.content_check?.warnings?.length || !!seg.error;
-      row.hidden = filter === "pending" ? !!seg.accepted : filter === "ready" ? !seg.accepted : filter === "review" ? !review : false;
+      const hidden = filter === "pending" ? !!seg.accepted : filter === "ready" ? !seg.accepted : filter === "review" ? !review : false;
+      row.classList.toggle("hidden", hidden);
       row.classList.toggle("active",seg.id === selectedId);
       row.querySelector("input").checked = checked.has(seg.id);
       row.querySelector("small").textContent = `${seg.id} · ${seg.status === "running" ? "生成中" : seg.accepted ? "採用済み" : "未生成"}${draftChanged ? " · 編集未反映" : review ? " · 要確認" : ""}`;
       row.querySelector("span").textContent = seg.draft.text;
     }
     for(const row of [...panel.children]) if(!job.segments.some(s => s.id === row.dataset.id)) row.remove();
+    $("segments-empty").classList.toggle("hidden", [...panel.children].some(row => !row.classList.contains("hidden")));
   }
   let versionsSignature = "";
   function renderVersions(seg) {
@@ -236,7 +239,7 @@
     const seconds = times.length ? times.reduce((a,b)=>a+b,0)/times.length * (job.total-job.current) : null;
     $("timing").textContent = busy() && job.operation === "generate" && seconds > 0 ? `残り目安 ${Math.ceil(seconds/60)}分（生成実測から推定）` : "";
     $("cancel").classList.toggle("hidden",!busy()); $("cancel").disabled = job.cancel_requested;
-    for(const id of ["regenerate-all","generate-all","generate-selected","regenerate","save-edit","judge","save-dictionary","find-pronunciations","import-pronunciations"]) $(id).disabled = !!busy();
+    for(const id of ["regenerate-all","generate-all","generate-selected","regenerate","save-edit","judge","save-dictionary","find-pronunciations","import-pronunciations","export-project"]) $(id).disabled = !!busy();
     for(const button of $("pronunciation-candidates").querySelectorAll("button")) button.disabled = !!busy();
     const readingPreview = job.pronunciation_preview;
     $("play-pronunciation").classList.toggle("hidden", !readingPreview);
@@ -272,6 +275,40 @@
   }
   setInterval(poll,1500);
   $("filter").onchange = () => {if(job) renderSegments();};
+  $("import-project").onclick = () => $("project-file").click();
+  $("project-file").onchange = () => action(async () => {
+    const file = $("project-file").files[0]; if (!file) return;
+    $("import-project").disabled = true;
+    try {
+      if (file.size > 2 * 1024 ** 3) throw new Error("プロジェクト ZIP は2 GBまでです");
+      notice("プロジェクト ZIP を読み込んでいます…");
+      const body = new FormData(); body.append("archive", file);
+      const data = await api("/api/project-import", {method:"POST", body});
+      $("show-trash").checked = false;
+      await openJob(data.id);
+      notice("新しい制作としてプロジェクトを読み込みました。" + (data.reference_warnings.length ? "\n" + data.reference_warnings.join("\n") : ""));
+    } finally { $("project-file").value = ""; $("import-project").disabled = false; }
+  });
+  $("export-project").onclick = () => action(async () => {
+    const jid = job.id;
+    requireSavedDictionary();
+    await saveEdit();
+    if (job.segments.some(s => readLocal(draftKey(jid, s.id)))) {
+      throw new Error("未保存の編集があります。各セグメントの編集を保存してから書き出してください。");
+    }
+    $("export-project").disabled = true;
+    notice("プロジェクト ZIP を作成しています…");
+    const res = await fetch(`/api/jobs/${jid}/project-archive`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || "プロジェクトを書き出せませんでした");
+    }
+    const url = URL.createObjectURL(await res.blob());
+    const link = document.createElement("a"); link.href = url; link.download = `project_${jid}.zip`;
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    notice("プロジェクト ZIP のダウンロードを開始しました。");
+  });
   let setupRevision = 0;
   $("new-job").onclick = () => {
     closeRename(); job=null;selectedId=null;renderedId=null;sequence=[];

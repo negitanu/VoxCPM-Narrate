@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import threading
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -32,6 +33,150 @@ class FakeModel:
 
 
 class StudioTests(unittest.TestCase):
+    def project_zip(self, jid):
+        response = self.client.get(f"/api/jobs/{jid}/project-archive")
+        self.assertEqual(response.status_code, 200, response.text if response.status_code != 200 else "")
+        return response.content
+
+    def import_project_zip(self, contents):
+        return self.client.post("/api/project-import", files={
+            "archive": ("project.zip", contents, "application/zip")})
+
+    def rewrite_project_zip(self, contents, change):
+        with zipfile.ZipFile(io.BytesIO(contents)) as archive:
+            files = {name: archive.read(name) for name in archive.namelist()}
+        metadata = json.loads(files["project.json"])
+        change(metadata, files)
+        files["project.json"] = json.dumps(metadata).encode()
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as archive:
+            for name, data in files.items():
+                archive.writestr(name, data)
+        return output.getvalue()
+
+    def test_project_zip_roundtrip_draft_and_duplicate_import(self):
+        source = self.create()
+        self.manager.update(source["id"], dictionary={"本文": "ほんぶん"})
+        contents = self.project_zip(source["id"])
+        restored_ids = []
+        for _ in range(2):
+            response = self.import_project_zip(contents)
+            self.assertEqual(response.status_code, 200, response.text)
+            restored = response.json()
+            restored_ids.append(restored["id"])
+            self.assertEqual(restored["script"], source["script"])
+            self.assertEqual(restored["dictionary"], {"本文": "ほんぶん"})
+            self.assertEqual(restored["status"], "draft")
+            self.assertEqual(restored["current"], 0)
+            self.assertIsNone(restored["export"])
+        self.assertEqual(len({source["id"], *restored_ids}), 3)
+        self.assertEqual(self.manager.lexicon()["entries"], {})
+        self.run_all(restored_ids[0])
+
+    def test_project_zip_roundtrip_reference_candidates_history_and_edit(self):
+        wav = io.BytesIO()
+        sf.write(wav, np.ones(16000, dtype="float32") * .1, 16000, format="WAV")
+        source = self.client.post("/api/jobs", data={"script": "本文です。",
+            "reference_script": "録音の例文", "reference_transcript": "本文です。",
+            "transcript_confirmed": "true"}, files={
+                "reference": ("reference.wav", wav.getvalue(), "audio/wav")}).json()
+        jid, sid = source["id"], source["segments"][0]["id"]
+        self.run_all(jid)
+        self.service.regenerate(jid, sid)
+        candidate = self.manager.get(jid)["segments"][0]["versions"][-1]["id"]
+        self.service.adopt(jid, sid, candidate)
+        self.service.regenerate(jid, sid)
+        source = self.manager.get(jid)
+        seg = source["segments"][0]
+        self.service.edit(jid, sid, seg["revision"], {**seg["draft"], "text": "保存した編集です。"})
+        contents = self.project_zip(jid)
+        response = self.import_project_zip(contents)
+        self.assertEqual(response.status_code, 200, response.text)
+        restored = self.manager.get(response.json()["id"])
+        rseg = restored["segments"][0]
+        self.assertEqual(rseg["draft"]["text"], "保存した編集です。")
+        self.assertEqual(rseg["accepted"], candidate)
+        self.assertEqual(rseg["history"], seg["history"])
+        self.assertEqual(len(rseg["versions"]), 3)
+        self.assertEqual(restored["config"]["reference_audio"], "reference.wav")
+        self.assertEqual(restored["config"]["reference_transcript"], "本文です。")
+        self.assertEqual((self.manager.job_dir(jid) / "reference.wav").read_bytes(),
+                         (self.manager.job_dir(restored["id"]) / "reference.wav").read_bytes())
+        for v in rseg["versions"]:
+            audio = self.client.get(f"/api/jobs/{restored['id']}/segments/{sid}?version_id={v['id']}")
+            self.assertEqual(audio.status_code, 200)
+            self.assertEqual(audio.content, self.service.audio_path(jid, sid, v["id"]).read_bytes())
+        original_download = self.client.get(f"/api/jobs/{jid}/download")
+        restored_download = self.client.get(f"/api/jobs/{restored['id']}/download")
+        self.assertEqual(restored_download.status_code, 200)
+        self.assertEqual(restored_download.content, original_download.content)
+        self.service.adopt(restored["id"], sid, rseg["history"][0])
+        self.assertEqual(self.client.get(f"/api/jobs/{restored['id']}/archive").status_code, 200)
+        self.assertEqual(self.manager.get(jid)["segments"][0]["accepted"], candidate)
+
+    def test_project_zip_partial_generation_resumes(self):
+        source = self.create()
+        sid = source["segments"][0]["id"]
+        self.service.generate(source["id"], [sid])
+        response = self.import_project_zip(self.project_zip(source["id"]))
+        self.assertEqual(response.status_code, 200, response.text)
+        restored = response.json()
+        self.assertEqual(restored["current"], 1)
+        self.assertIsNone(restored["export"])
+        finished = self.run_all(restored["id"])
+        self.assertEqual(len(finished["segments"][0]["versions"]), 1)
+
+    def test_project_zip_rejects_invalid_data_without_partial_project(self):
+        source = self.run_all(self.create()["id"])
+        contents = self.project_zip(source["id"])
+        before = sorted(p.name for p in self.manager.root.iterdir())
+        mutations = [
+            lambda m, f: m.update(version=999),
+            lambda m, f: m["production"]["segments"][0].update(id="../escape"),
+            lambda m, f: m["production"]["segments"][0].update(accepted="missing"),
+            lambda m, f: m["production"]["config"].update(reference_audio="/tmp/private.wav"),
+            lambda m, f: f.update({"../escape.txt": b"escape"}),
+            lambda m, f: f.pop(next(iter(m["files"]))),
+            lambda m, f: f.update({next(iter(m["files"])): b"corrupt"}),
+            lambda m, f: m["production"]["config"].update(api_key="must-not-import"),
+        ]
+        for change in mutations:
+            with self.subTest(change=change):
+                result = self.import_project_zip(self.rewrite_project_zip(contents, change))
+                self.assertEqual(result.status_code, 400, result.text)
+                self.assertEqual(len(self.manager.list()), 1)
+                self.assertEqual(sorted(p.name for p in self.manager.root.iterdir()), before)
+        self.assertEqual(self.import_project_zip(b"not a zip").status_code, 400)
+
+    def test_project_zip_rejects_symlinks_duplicates_and_oversized_archive(self):
+        from voxcpm_narrate.web import project_archive
+        import warnings
+
+        contents = self.project_zip(self.create()["id"])
+        for symlink in (True, False):
+            output = io.BytesIO(contents)
+            with warnings.catch_warnings(), zipfile.ZipFile(output, "a") as archive:
+                warnings.simplefilter("ignore", UserWarning)
+                entry = zipfile.ZipInfo("link" if symlink else "project.json")
+                entry.create_system = 3
+                entry.external_attr = (0o120777 if symlink else 0o100644) << 16
+                archive.writestr(entry, b"/tmp/secret")
+            self.assertEqual(self.import_project_zip(output.getvalue()).status_code, 400)
+        with patch.object(project_archive, "MAX_ARCHIVE_BYTES", 1):
+            self.assertEqual(self.import_project_zip(contents).status_code, 400)
+
+    def test_project_zip_busy_export_and_transient_state(self):
+        source = self.create()
+        self.manager.update(source["id"], status="running")
+        self.assertEqual(self.client.get(f"/api/jobs/{source['id']}/project-archive").status_code, 409)
+        self.manager.update(source["id"], status="interrupted", cancel_requested=True,
+                            operation="generate", requests=["old-request"])
+        response = self.import_project_zip(self.project_zip(source["id"]))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["cancel_requested"])
+        self.assertIsNone(response.json()["operation"])
+        self.assertEqual(response.json()["requests"], [])
+
     def test_model_lists_hide_non_audio_and_unknown_capabilities(self):
         settings = self.client.get('/api/llm/settings').json()
         self.assertTrue(settings['suggested_models'])
