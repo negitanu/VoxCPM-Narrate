@@ -1,4 +1,4 @@
-# voxcpm-narrate
+# VoxCPM-Narrate
 
 [VoxCPM2](https://github.com/OpenBMB/VoxCPM) を使い、日本語の台本からナレーションを制作するローカル TTS ツールです。ブラウザーで編集・録音・候補比較・書き出しを行う Web UI と、台本をまとめて生成・改善する CLI を提供します。
 
