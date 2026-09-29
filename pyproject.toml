@@ -44,14 +44,20 @@ include = [
   "README.md",
   "LICENSE",
   ".env.example",
+  ".dockerignore",
+  ".python-version",
+  "Dockerfile",
+  "compose.yml",
+  "compose.gpu.yml",
+  "uv.lock",
   "pyproject.toml",
   "examples",
   "benchmarks",
   "workspace/README.md",
   "workspace/.gitkeep",
-  "generate_speech.zsh",
-  "improve_speech.zsh",
-  "serve_web.zsh",
+  "generate_speech.sh",
+  "improve_speech.sh",
+  "serve_web.sh",
 ]
 
 [tool.uv]

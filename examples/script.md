@@ -10,7 +10,7 @@ In `markdown` mode, only text under `### 読み上げ本文` (configurable via
 `--narration-heading`) is spoken. Change the heading name if you prefer English:
 
 ```bash
-./generate_speech.zsh --narration-heading Narration --input workspace/script.md
+./generate_speech.sh --narration-heading Narration --input workspace/script.md
 ```
 
 ## Section 1 — Introduction

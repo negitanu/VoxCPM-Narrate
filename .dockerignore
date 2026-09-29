@@ -7,7 +7,11 @@
 !README.md
 !LICENSE
 !src/
-!src/**
+!src/**/
+!src/**/*.py
+!src/**/*.html
+!src/**/*.css
+!src/**/*.js
 !examples/
 !examples/*.md
 !examples/*.ssml

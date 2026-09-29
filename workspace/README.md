@@ -11,7 +11,7 @@
 #   cp examples/script.md workspace/script.md
 #   # or: cp examples/script.ssml workspace/script.ssml
 #   cp /path/to/your-voice.wav workspace/source.wav
-#   ./generate_speech.zsh --dry-run
+#   ./generate_speech.sh --dry-run
 #
 # Or pass paths explicitly:
-#   ./generate_speech.zsh --input path/to/script.md --reference path/to/voice.wav
+#   ./generate_speech.sh --input path/to/script.md --reference path/to/voice.wav

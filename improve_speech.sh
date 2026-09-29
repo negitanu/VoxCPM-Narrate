@@ -1,16 +1,16 @@
-#!/usr/bin/env zsh
-# improve_speech.zsh — intonation self-improvement harness for an existing run
+#!/usr/bin/env bash
+# improve_speech.sh — intonation self-improvement harness for an existing run
 #
 # Examples:
-#   ./improve_speech.zsh
-#   ./improve_speech.zsh --asr --max-rounds 4
-#   ./improve_speech.zsh --asr --llm-judge --llm-model openai/gpt-4o-mini
-#   ./improve_speech.zsh --segment-id 03_002 --segment-id 07_002
-#   ./improve_speech.zsh --run-dir output/voxcpm2/run_YYYYMMDD_HHMMSS
+#   ./improve_speech.sh
+#   ./improve_speech.sh --asr --max-rounds 4
+#   ./improve_speech.sh --asr --llm-judge --llm-model openai/gpt-4o-mini
+#   ./improve_speech.sh --segment-id 03_002 --segment-id 07_002
+#   ./improve_speech.sh --run-dir output/voxcpm2/run_YYYYMMDD_HHMMSS
 
 set -euo pipefail
 
-SCRIPT_DIR="${0:A:h}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$SCRIPT_DIR"
 
 ensure_uv() {
@@ -49,7 +49,7 @@ OPTIMIZE=0
 
 usage() {
   cat <<'EOF'
-Usage: ./improve_speech.zsh [options]
+Usage: ./improve_speech.sh [options]
 
 Evaluate synthesized segments for awkward intonation / pacing, regenerate
 candidates, keep improvements, and rebuild full.wav.

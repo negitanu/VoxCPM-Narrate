@@ -26,7 +26,6 @@ Thumbs.db
 # Synthesis outputs & logs
 output/
 *.log
-generate.log
 
 # Local working inputs at repo root (legacy / convenience paths)
 /script.md

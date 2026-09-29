@@ -13,10 +13,10 @@
 
 ## 使い方
 
-```zsh
+```sh
 # 録音したファイルを配置
 cp /path/to/recording.wav workspace/source.wav
 
 # 合成
-./generate_speech.zsh
+./generate_speech.sh
 ```

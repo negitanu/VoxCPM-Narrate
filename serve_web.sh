@@ -1,14 +1,14 @@
-#!/usr/bin/env zsh
-# serve_web.zsh — Material-inspired Web UI for VoxCPM Narrate
+#!/usr/bin/env bash
+# serve_web.sh — Material-inspired Web UI for VoxCPM Narrate
 #
-#   ./serve_web.zsh
-#   VOXCPM_WEB_PORT=8080 ./serve_web.zsh
+#   ./serve_web.sh
+#   VOXCPM_WEB_PORT=8080 ./serve_web.sh
 #
 # Open http://127.0.0.1:7860
 
 set -euo pipefail
 
-SCRIPT_DIR="${0:A:h}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$SCRIPT_DIR"
 
 if ! command -v uv >/dev/null 2>&1; then

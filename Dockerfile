@@ -49,7 +49,7 @@ WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 COPY examples/ ./examples/
 COPY benchmarks/ ./benchmarks/
-USER narrate
+USER narrate:narrate
 
 EXPOSE 7860
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \

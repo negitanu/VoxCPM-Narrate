@@ -16,20 +16,20 @@ this directory.
 
 ## Setup
 
-```zsh
+```sh
 cp examples/script.md workspace/script.md
 # or: cp examples/script.ssml workspace/script.ssml
 
 # Record examples/reference_recording.md, then:
 cp /path/to/voice.wav workspace/source.wav
 
-./generate_speech.zsh --dry-run
+./generate_speech.sh --dry-run
 ```
 
 ## Explicit paths
 
-```zsh
-./generate_speech.zsh \
+```sh
+./generate_speech.sh \
   --input examples/script.ssml \
   --reference /path/to/voice.wav \
   --dry-run

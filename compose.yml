@@ -12,10 +12,9 @@ services:
       # before changing the host binding for a cloud deployment.
       - "${VOXCPM_BIND_ADDRESS:-127.0.0.1}:${VOXCPM_WEB_PORT:-7860}:7860"
     environment:
-      VOXCPM_WEB_HOST: "0.0.0.0"
-      VOXCPM_WEB_PORT: "7860"
+      # Listener, internal port and data paths are defined by the image.
+      # Opt in here because Docker forwards requests across its network.
       VOXCPM_ALLOW_REMOTE: "1"
-      VOXCPM_WEB_OUT: /app/output/voxcpm2/web_jobs
       VOXCPM_LLM_PROVIDER: "${VOXCPM_LLM_PROVIDER:-openrouter}"
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
       OPENROUTER_MODEL: "${OPENROUTER_MODEL:-openai/gpt-4o-mini}"

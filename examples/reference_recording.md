@@ -12,10 +12,10 @@ VoxCPM2 の Voice Cloning 用に、**15〜25秒程度**のきれいな発話を�
 - 推奨形式: **WAV（48kHz または 16kHz、モノラル）**
 - 保存先の例: `workspace/source.wav`
 
-```zsh
+```sh
 # 録音後
 cp ~/Desktop/reference.wav workspace/source.wav
-./generate_speech.zsh --dry-run
+./generate_speech.sh --dry-run
 ```
 
 ## 読み上げ本文（これだけ読む）

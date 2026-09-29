@@ -1,17 +1,17 @@
-#!/usr/bin/env zsh
-# generate_speech.zsh — portable entrypoint for voxcpm-narrate (uv-managed)
+#!/usr/bin/env bash
+# generate_speech.sh — portable entrypoint for voxcpm-narrate (uv-managed)
 #
 # Prerequisites: uv (https://docs.astral.sh/uv/), ffmpeg (for non-WAV references)
 #
 # Typical flow:
 #   cp examples/script.md workspace/script.md
 #   cp /path/to/voice.wav workspace/source.wav
-#   ./generate_speech.zsh --dry-run
-#   ./generate_speech.zsh
+#   ./generate_speech.sh --dry-run
+#   ./generate_speech.sh
 
 set -euo pipefail
 
-SCRIPT_DIR="${0:A:h}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$SCRIPT_DIR"
 
 ensure_uv() {
@@ -96,7 +96,7 @@ REFERENCE_SET=0
 
 usage() {
   cat <<'EOF'
-Usage: ./generate_speech.zsh [options]
+Usage: ./generate_speech.sh [options]
 
 uv-managed portable batch for local VoxCPM2 narration TTS.
 
@@ -259,7 +259,7 @@ if (( DRY_RUN )); then
   ARGS+=(--dry-run)
 fi
 
-ARGS+=("${EXTRA_ARGS[@]}")
+ARGS+=(${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"})
 
 echo "==> input     : $INPUT"
 echo "==> mode      : $MODE"

@@ -71,19 +71,6 @@ SUGGESTED_OPENROUTER_MODELS: tuple[tuple[str, str], ...] = tuple(
 )
 
 
-def model_supports_audio(model_id: str) -> bool:
-    mid = (model_id or "").strip()
-    for item in OPENROUTER_MODELS:
-        if item["id"] == mid:
-            return bool(item["supportsAudio"])
-    # Unknown custom ids: treat as non-audio unless caller opts in.
-    return False
-
-
-def audio_capable_models() -> list[dict[str, Any]]:
-    return [dict(m) for m in OPENROUTER_MODELS if m["supportsAudio"]]
-
-
 @dataclass
 class LlmJudgement:
     score: float | None

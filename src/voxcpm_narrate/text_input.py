@@ -1,12 +1,10 @@
 """Explicit text preparation; never run Japanese through a zh/en normalizer."""
 
-import re
 from functools import lru_cache
 
 from voxcpm_narrate.japanese import DEFAULT_CONTROL, JAPANESE_VOICE, LEGACY_CONTROL, japanese_numbers
 
 INPUT_VERSION = "japanese-reading-v5"
-JAPANESE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uff66-\uff9f]")
 
 
 @lru_cache(maxsize=1)
