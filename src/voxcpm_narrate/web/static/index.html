@@ -15,13 +15,18 @@
 <main>
 <div id="notice" role="status" aria-live="polite" class="notice hidden"></div>
 <section id="setup">
-  <div class="eyebrow">NEW PRODUCTION</div><h1>台本を、伝わる声に。</h1><p class="muted">短く試して、気になる箇所を直しながら仕上げましょう。</p>
+  <div class="eyebrow">NEW PRODUCTION</div><h1>台本からナレーション音声を生成</h1><p class="muted">台本を分割して音声を生成し、箇所ごとに読み方の編集・再生成・試聴・採用ができます。採用した音声は WAV または ZIP で保存できます。</p><p class="muted">台本を入力するかファイルを取り込み、入力形式を選択してください。「分割を確認」で内容を確認し、「制作を保存して生成画面へ」を押してください。保存だけでは音声は生成されません。</p>
+  <ol class="workflow" aria-label="制作の手順"><li>1. 台本と設定を保存</li><li>2. 音声を生成・確認</li><li>3. WAV・ZIPで保存</li></ol>
   <form id="job-form">
+    <section class="form-step" aria-labelledby="script-heading"><h2 id="script-heading">1. 台本を入力</h2>
     <label>制作名<input id="title" maxlength="150" value="新しいナレーション" required></label>
     <div class="split"><label>入力形式<select id="mode"><option value="plain">プレーンテキスト</option><option value="markdown">Markdown（読み上げ本文）</option><option value="ssml">SSML</option><option value="lines">行ごとのテキスト</option></select></label><label>台本ファイルを取り込む<input id="script-file" type="file" accept=".txt,.md,.markdown,.ssml,.xml"></label></div>
     <label>台本 <small>読み込み後の編集内容が生成に使われます</small><textarea id="script" rows="10" placeholder="ここに読み上げる台本を入力してください。" required maxlength="200000"></textarea></label>
+    </section>
+    <details class="optional-settings"><summary>2. 話し方・参照音声を設定 <span class="muted small">任意・既定のまま生成できます</span></summary>
     <section class="reference-studio" aria-labelledby="reference-heading">
       <h2 id="reference-heading">話し方と参照音声</h2>
+      <p class="muted small">話し方を選択し、必要に応じて指示を編集してください。声質を指定する場合は、参照音声を録音するか音声ファイルを選択してください。参照音声なしでも生成できます。</p>
       <div class="split">
         <label>話し方の例<select id="voice-style">
           <option value="standard">標準 · 自然な説明</option><option value="calm">落ち着いたナレーション</option>
@@ -50,10 +55,13 @@
         <label>目標話速（モーラ／秒）<input id="target-mora-rate" type="number" value="7" min="2" max="12" step="0.1"><small>目標指定時のみ使用。補正は±10%まで。大きな差や推定読みは原音を使い、話速だけで再生成しません。</small></label>
       </div>
     </section>
+    </details>
+    <details class="optional-settings"><summary>数字の読み方を設定 <span class="muted small">既定：日本語読みに変換</span></summary>
     <label class="check"><input id="convert-numbers" type="checkbox" checked>数字・日付を日本語の読みに変換する</label>
     <label>数字の渡し方<select id="number-reading-style"><option value="kanji">漢数字＋助数詞を保持</option><option value="hiragana">ひらがな（従来）</option></select><small>「2026年に」→「二千二十六年に」。数詞と助詞を区別しやすい表記を残します。数字変換がオンのときに適用します。</small></label>
     <p class="muted small">例：2026年8月26日 → 二千二十六年八月二十六日。「分割を確認」で生成に渡す表記を確認できます。型番などは読み方の上書きで指定してください。</p>
-    <details><summary>生成の詳細設定</summary><div class="settings-grid">
+    </details>
+    <details><summary>生成・自動改善の詳細設定</summary><div class="settings-grid">
       <label>デバイス<select id="device"><option>auto</option><option>mps</option><option>cuda</option><option>cpu</option></select></label>
       <label>最大文字数<input id="max-chars" type="number" min="10" max="500" value="120"></label>
       <label>CFG<input id="cfg" type="number" min="0.1" max="5" step="0.1" value="2"></label>
@@ -61,8 +69,11 @@
       <label>乱数 seed<input id="seed" type="number" min="0" max="2147483647" value="42"></label>
       <label>改善試行の上限<input id="rounds" type="number" min="0" max="6" value="3"></label>
     </div><label class="check"><input id="improve" type="checkbox">音響チェックと自動改善を実行</label><label class="check"><input id="asr" type="checkbox">文字起こしで読み誤りも照合（初回はモデル取得）</label><label class="check"><input id="llm" type="checkbox">台本・文字起こし・指標を外部 LLM で評価</label></details>
-    <div class="actions"><button id="preview" type="button">分割を確認</button><button class="primary" type="submit">制作を保存して試聴へ</button></div>
+    <section class="form-step"><h2>3. 分割を確認して保存</h2><p class="muted small">保存後の画面で生成する箇所を選べます。この操作では音声はまだ生成されません。</p>
+    <p class="muted small">外部評価を使う場合は、制作を保存する前に接続先を選択してください。</p><button type="button" id="setup-provider">外部 AI を設定（OpenRouter / Azure）</button>
+    <div class="actions"><button id="preview" type="button">分割を確認</button><button class="primary" type="submit">制作を保存して生成画面へ</button></div>
     <ol id="preview-list" class="preview-list"></ol>
+    </section>
   </form>
 </section>
 <section id="studio" class="hidden">
@@ -73,26 +84,31 @@
   </form>
   <div id="progress" role="progressbar" aria-label="生成済みセグメント" aria-valuemin="0" aria-valuemax="100"><div id="progress-fill"></div></div>
   <div class="progress-caption"><span id="progress-text" aria-live="polite"></span><span id="timing" class="muted"></span></div>
-  <div class="actions toolbar"><button class="primary" id="generate-all">未生成部分を生成・再開</button><button id="regenerate-all">全て再生成</button><button id="generate-selected">選択箇所を試聴生成</button><button id="cancel" class="hidden">中断する</button><button id="play-all">連続試聴</button><button id="fork-script">台本を編集して新規制作</button><button id="export-project">プロジェクト ZIP を保存</button></div>
-  <p class="muted small">プロジェクト ZIP は未生成の制作も保存できます。台本・設定・辞書・参照音声・音声候補・採用履歴を含みます。</p>
+  <section class="next-action" aria-labelledby="next-action-heading"><h2 id="next-action-heading">次の操作</h2><p id="next-action-text" role="status" aria-live="polite"></p>
+    <div class="actions toolbar"><button class="primary" id="generate-all">未生成部分を生成・再開</button><button id="generate-selected">選択箇所を試聴生成</button><button id="cancel" class="hidden">中断する</button><button id="play-all">採用音声を連続試聴</button><a class="button" href="#export-section">書き出しへ</a></div>
+    <details class="inline-help"><summary>生成と採用の違い</summary><p>初回生成は検査に合格すると自動採用されます。個別の再生成は候補を追加します。候補を試聴して「採用」を押すと、全文音声に反映されます。</p></details>
+  </section>
+  <details class="project-actions"><summary>制作の保存・複製・全て再生成</summary><p class="muted small">途中の状態を残すにはプロジェクト ZIP を保存してください。全て再生成は全箇所を作り直し、全件合格後に一括採用します。</p><div class="actions"><button id="export-project">プロジェクト ZIP を保存</button><button id="fork-script">台本を編集して新規制作</button><button id="regenerate-all">全て再生成</button></div></details>
   <div class="workbench">
-    <section class="segment-list-panel" aria-label="セグメント一覧"><div class="list-heading"><h2>セグメント</h2><select id="filter" aria-label="セグメントの絞り込み"><option value="all">すべて</option><option value="pending">未生成</option><option value="review">要確認・候補あり</option><option value="ready">採用済み</option></select></div><div id="segments"></div><p id="segments-empty" class="muted hidden" role="status">該当するセグメントはありません。</p></section>
+    <section class="segment-list-panel" aria-label="セグメント一覧"><div class="list-heading"><h2>1. 修正する箇所を選択</h2><select id="filter" aria-label="セグメントの絞り込み"><option value="all">すべて</option><option value="pending">未生成</option><option value="review">要確認・候補あり</option><option value="ready">採用済み</option></select></div><div id="segments"></div><p id="segments-empty" class="muted hidden" role="status">該当するセグメントはありません。</p></section>
     <section id="editor" class="editor" aria-label="セグメント編集">
       <div class="title-row"><h2 id="segment-title"></h2><span id="save-status" class="muted"></span></div>
-      <p id="original-text" class="original"></p>
+      <p class="muted small">チェックボックスは試聴生成の対象、本文のクリックは編集対象の選択です。</p><p id="original-text" class="original"></p>
       <label>読み上げ本文<textarea id="edit-text" rows="4" maxlength="2000"></textarea></label>
       <label>読み方の上書き（任意）<input id="edit-reading" maxlength="2000" placeholder="未入力なら本文と読み辞書を使用"></label>
-      <label>数字・日付の日本語読み<select id="edit-convert-numbers"><option value="">制作の設定に従う</option value="true">変換する</option><option value="false">変換しない</option></select><small>保存後の再生成から反映します。読み方の上書き・辞書の適用後に変換します。</small></label>
+      <details><summary>読み変換・話し方・文間を調整</summary>
+      <label>数字・日付の日本語読み<select id="edit-convert-numbers"><option value="">制作の設定に従う</option><option value="true">変換する</option><option value="false">変換しない</option></select><small>保存後の再生成から反映します。読み方の上書き・辞書の適用後に変換します。</small></label>
       <label>数字の渡し方<select id="edit-number-reading-style"><option value="">制作の設定に従う</option><option value="kanji">漢数字＋助数詞を保持</option><option value="hiragana">ひらがな（従来）</option></select><small>数字変換をオンにして保存・再生成してください。手入力したかなの読みはそのまま使用します。</small></label>
       <label>話し方<input id="edit-control" maxlength="1000"></label>
       <label>直前の間（秒）<input id="edit-pause" type="number" min="0" max="10" step="0.05"></label>
+      </details>
       <div class="actions"><button id="save-edit">編集を保存</button><button id="resolve-edit" class="hidden">保持した編集を最新状態に適用</button><button class="primary" id="regenerate">候補を再生成</button></div>
       <p class="muted small">編集の保存だけでは音声は変わりません。候補を生成し、試聴してから採用してください。</p>
-      <h3>音声の比較と採用</h3><div id="versions"></div>
-      <details id="feedback-panel"><summary>音声を聴いて改善提案</summary><p id="feedback-provider-note" class="muted small">採用中の音声と本文を選択した外部サービスに送信します。提案は自動で採用されません（制作あたり最大50回）。</p><button id="judge">外部評価を実行</button><p id="feedback-text"></p><div id="suggestion" class="hidden"><label>提案された本文<textarea id="suggested-text" rows="3" readonly></textarea></label><p id="suggested-control" class="muted"></p><button id="use-suggestion">提案を編集欄に取り込む</button></div></details>
+      <h3>3. 候補を試聴して採用</h3><div id="versions"></div>
+      <details id="feedback-panel"><summary>音声を聴いて改善提案</summary><p id="feedback-provider-note" class="muted small">採用中の音声と本文を選択した外部サービスに送信します。提案は自動で採用されません（制作あたり最大50回）。</p><div class="actions"><button type="button" id="feedback-settings">接続先・API キーを確認</button><button id="judge">外部評価を実行</button></div><p id="feedback-text"></p><div id="suggestion" class="hidden"><label>提案された本文<textarea id="suggested-text" rows="3" readonly></textarea></label><p id="suggested-control" class="muted"></p><button id="use-suggestion">提案を編集欄に取り込む</button></div></details>
     </section>
   </div>
-  <details id="pronunciation-panel" open><summary>生成前の読み確認・辞書</summary>
+  <details id="pronunciation-panel"><summary>読み間違いを直す・辞書に登録する</summary>
     <p class="muted small">読みを入力し、文中で試聴してから登録できます。「次の制作でも使う」を選ぶと共通辞書に蓄積します。候補は簡易抽出のため、通常の語が含まれる場合や見落としがあります。</p>
     <div class="actions"><button id="find-pronunciations">読みの確認候補を更新</button><button id="import-pronunciations">共通辞書を取り込む</button><span id="lexicon-count" class="muted small"></span></div>
     <label class="check"><input id="show-registered-readings" type="checkbox">登録済みの語も再確認する</label>
@@ -103,9 +119,9 @@
     <details><summary>登録済みの読みを直接編集する</summary><label>1行に「表記=読み」を入力<textarea id="dictionary" rows="4" placeholder="VoxCPM=ボックスシーピーエム"></textarea></label><button id="save-dictionary">この制作の読み辞書を保存</button></details>
     <p class="muted small">登録は次の生成から反映されます。既存の音声は候補を再生成して採用してください。共通辞書は新しい制作にコピーされ、この制作の読みを優先します。</p>
   </details>
-  <div class="export-row"><h2>書き出し</h2><p id="export-note" class="muted">すべてのセグメントを生成すると書き出せます。</p><div id="exports" class="actions hidden"><a id="download" class="button" download>原音 WAV</a><a id="download-normalized" class="button" download>音量・間を整えた WAV</a><a id="archive" class="button" download>原音・台本・条件 ZIP</a><a id="archive-finished" class="button" download>仕上げ音声・測定結果 ZIP</a><button id="play-full">原音を再生</button><button id="play-finished">仕上げ後を再生</button></div><p class="muted">仕上げは −16 LUFS を目安に小さい音量を補います。すでに十分な音量は極力維持し、ピークを保護します。3秒以上の音声と ffmpeg が必要です。原音は保持されます。</p></div>
+  <div class="export-row" id="export-section"><h2>完成音声を書き出す</h2><p id="export-note" class="muted">すべてのセグメントを生成・採用すると書き出せます。</p><div id="exports" class="actions hidden"><a id="download" class="button" download>原音 WAV</a><a id="download-normalized" class="button" download>音量・間を整えた WAV</a><a id="archive" class="button" download>原音・台本・条件 ZIP</a><a id="archive-finished" class="button" download>仕上げ音声・測定結果 ZIP</a><button id="play-full">原音を再生</button><button id="play-finished">仕上げ後を再生</button></div><p class="muted">仕上げは −16 LUFS を目安に小さい音量を補います。すでに十分な音量は極力維持し、ピークを保護します。3秒以上の音声と ffmpeg が必要です。原音は保持されます。</p></div>
 </section>
-<details id="external-settings"><summary>外部評価の設定</summary><p class="muted small">API キーはこのタブのメモリ内だけで扱い、制作データには保存しません。サーバーの環境変数も利用できます。</p><label>プロバイダー<select id="llm-provider"><option value="openrouter">OpenRouter</option><option value="azure">Azure OpenAI Service</option></select><small>制作を保存すると、その制作のプロバイダーが固定されます。</small></label><div class="split"><label id="provider-key-label">OpenRouter API キー<input id="api-key" type="password" autocomplete="off"></label><label id="openrouter-model-field">評価モデル<select id="llm-model"></select></label></div><div id="azure-fields" class="split hidden"><label>テキスト評価のデプロイ名<input id="azure-text-deployment" maxlength="200" placeholder="例: narration-text"></label><label>音声評価のデプロイ名<input id="azure-audio-deployment" maxlength="200" placeholder="例: narration-audio"><small>音声入力に対応した Azure OpenAI のデプロイを指定してください。</small></label></div><div class="actions"><button id="refresh-models">OpenRouter モデル一覧を更新</button><button id="clear-key">入力キーと旧保存キーを消去</button></div><p id="key-status" class="muted small"></p></details>
+<details id="external-settings"><summary>外部 AI 評価：OpenRouter / Azure OpenAI Service</summary><p id="provider-selection-note" class="muted small"></p><p class="muted small">API キーはこのタブのメモリ内だけで扱い、制作データには保存しません。サーバーの環境変数も利用できます。</p><label>プロバイダー<select id="llm-provider"><option value="openrouter">OpenRouter</option><option value="azure">Azure OpenAI Service</option></select><small>保存後も変更できます。変更は次回の評価から適用します。</small></label><div class="split"><label id="provider-key-label">OpenRouter API キー<input id="api-key" type="password" autocomplete="off"></label><label id="openrouter-model-field">評価モデル<select id="llm-model"></select></label></div><div id="azure-fields" class="split hidden"><div class="azure-setup"><h3>Azure の接続設定</h3><p>サーバーの .env に AZURE_OPENAI_ENDPOINT（リソースURL）を設定し、再起動してください。API キーは上の入力欄、または AZURE_OPENAI_API_KEY で指定できます。</p><p>テキスト評価と音声評価には、それぞれ利用するデプロイ名を入力してください。音声評価は音声入力対応のデプロイが必要です。OpenRouter のモデル一覧は使用しません。</p><small>環境変数での既定値：AZURE_OPENAI_TEXT_DEPLOYMENT / AZURE_OPENAI_AUDIO_DEPLOYMENT</small></div><label>テキスト評価のデプロイ名<input id="azure-text-deployment" maxlength="200" placeholder="例: narration-text"></label><label>音声評価のデプロイ名<input id="azure-audio-deployment" maxlength="200" placeholder="例: narration-audio"><small>音声入力に対応した Azure OpenAI のデプロイを指定してください。</small></label></div><div class="actions"><button id="save-provider" type="button" class="primary hidden">評価設定を保存</button><button id="refresh-models">OpenRouter モデル一覧を更新</button><button id="clear-key">入力キーと旧保存キーを消去</button></div><p id="key-status" class="muted small"></p></details>
 </main>
 </div>
 <footer class="player"><div><strong id="player-label">試聴プレイヤー</strong><span id="player-detail" class="muted"></span></div><audio id="audio" controls preload="none"></audio><button id="stop">停止</button></footer>

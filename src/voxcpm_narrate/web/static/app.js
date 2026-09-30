@@ -32,8 +32,13 @@
   const accepted = (s) => s.versions.find(v => v.id === s.accepted);
   const busy = () => job && activeStates.has(job.status);
   const audioUrl = (sid, vid) => `/api/jobs/${job.id}/segments/${encodeURIComponent(sid)}?version_id=${encodeURIComponent(vid)}`;
-  const request = () => ({request_id:crypto.randomUUID(),api_key:$("api-key").value.trim()});
-  const provider = () => job?.config?.llm_provider || $("llm-provider").value;
+  const request = () => {
+    if (job && provider() !== (job.config.llm_provider || "openrouter")) {
+      throw new Error("接続先が未保存です。「評価設定を保存」を押してください。");
+    }
+    return {request_id:crypto.randomUUID(),api_key:$("api-key").value.trim()};
+  };
+  const provider = () => $("llm-provider").value;
   const audioJudgeModel = () => provider() === "azure" ? $("azure-audio-deployment").value.trim() : $("llm-model").value;
   const config = () => ({device:$("device").value,control:$("control").value,max_chars:+$("max-chars").value,
     convert_numbers:$("convert-numbers").checked,
@@ -42,7 +47,7 @@
     cfg_value:+$("cfg").value,timesteps:+$("timesteps").value,seed:+$("seed").value,
     improve:$("improve").checked,improve_asr:$("asr").checked,improve_llm:$("llm").checked,
     improve_rounds:+$("rounds").value,llm_provider:$("llm-provider").value,
-    llm_model:$("llm-provider").value === "azure" ? ($("azure-text-deployment").value.trim() || $("azure-audio-deployment").value.trim()) : $("llm-model").value || settings.default_model,
+    llm_model:$("llm-provider").value === "azure" ? $("azure-text-deployment").value.trim() : $("llm-model").value || settings.default_model,
     audio_judge_model:$("llm-provider").value === "azure" ? $("azure-audio-deployment").value.trim() : $("llm-model").value});
 
   async function refreshLibrary() {
@@ -197,6 +202,13 @@
     const signature = JSON.stringify([job.id,seg.id,seg.versions,seg.accepted,busy()]);
     if(signature === versionsSignature) return;
     versionsSignature = signature;
+    if (!seg.versions.length) {
+      const empty = document.createElement("p");
+      empty.className = "muted small";
+      empty.textContent = "この箇所の音声はまだありません。本文と読みを確認し、編集を保存してから「候補を再生成」を押してください。";
+      $("versions").replaceChildren(empty);
+      return;
+    }
     $("versions").replaceChildren(...[...seg.versions].reverse().map((v) => {
       const row = document.createElement("div"); row.className = "version-row";
       const label = document.createElement("span"); const isAccepted = seg.accepted === v.id;
@@ -230,6 +242,7 @@
   function render(data) {
     if(job && job.id !== data.id) return;
     job = data;
+    updateProviderUI();
     $("job-title").textContent = job.title; $("job-status").textContent = labels[job.status] || job.status;
     const regen = job.operation === "regenerate-all" ? job.regeneration_progress : null;
     const percent = regen ? Math.round(100 * regen.current / Math.max(1,regen.total)) : job.percent;
@@ -245,10 +258,22 @@
     $("play-pronunciation").classList.toggle("hidden", !readingPreview);
     $("pronunciation-preview-note").textContent = readingPreview ? `試聴時の読み：${readingPreview.term} → ${readingPreview.reading}（${readingPreview.segment_id}）` : "";
     $("play-all").disabled = job.current === 0;
+    const remaining = job.segments.filter(s => !s.accepted).length;
+    const changed = job.segments.some(s => s.accepted && ["text","reading","control","pause_before_sec","convert_numbers","number_reading_style"].some(k => (s.draft[k] ?? null) !== (accepted(s)?.[k] ?? null)));
+    const guidance = busy()
+      ? "処理中です。完了を待ってください。中断は現在の処理の区切りで反映されます。"
+      : job.status === "error"
+      ? "処理が停止しました。上のエラーと各候補の検査結果を確認し、読みや設定を修正して再生成してください。"
+      : remaining
+      ? `未採用の箇所が${remaining}件あります。「未生成部分を生成・再開」を押すか、候補のある箇所を試聴して採用してください。`
+      : changed
+      ? "保存済みの編集が採用音声に未反映です。修正した箇所の候補を再生成して採用してください。現在の書き出しには以前の採用音声を使います。"
+      : "全箇所の音声が採用済みです。連続試聴で内容を確認し、「書き出しへ」から WAV または ZIP を保存してください。";
+    if ($("next-action-text").textContent !== guidance) $("next-action-text").textContent = guidance;
     renderSegments();
     const seg = current();
     if(seg) {
-      $("segment-title").textContent = `${seg.id} の編集`;
+      $("segment-title").textContent = `2. ${seg.id} を編集・再生成`;
       $("original-text").textContent = `元の本文：${seg.original_text}`;
       const editing = ["edit-text","edit-reading","edit-control","edit-pause","edit-convert-numbers","edit-number-reading-style"].includes(document.activeElement?.id);
       if(renderedId !== `${job.id}/${seg.id}/${seg.revision}` && !editing) fillEditor(seg);
@@ -257,7 +282,7 @@
       renderVersions(seg);
       $("judge").disabled = busy() || !seg.accepted || !audioJudgeModel();
       const feedback = seg.feedback?.version_id === seg.accepted ? seg.feedback : null;
-      $("feedback-text").textContent = feedback?.feedback || "";
+      $("feedback-text").textContent = feedback ? `${feedback.provider ? `評価時の接続先: ${feedback.provider} / ${feedback.model || ""}\n` : ""}${feedback.feedback || ""}` : "";
       $("suggestion").classList.toggle("hidden",!feedback);
       if(feedback) { $("suggested-text").value = feedback.revised_text; $("suggested-control").textContent = feedback.voice_design_prompt; }
     }
@@ -340,7 +365,7 @@
     const body=new FormData();body.append("script",$("script").value);body.append("mode",$("mode").value);body.append("title",$("title").value);body.append("config",JSON.stringify(config()));
     window.referenceRecorder.appendTo(body);
     const data=await api("/api/jobs",{method:"POST",body});await openJob(data.id);
-    notice(data.reference_warnings.join("\n") || "制作を保存しました。まず1〜2箇所を選んで試聴できます。");
+    notice(data.reference_warnings.join("\n") || "制作を保存しました。「未生成部分を生成・再開」で音声を生成してください。一部だけ試す場合はセグメントを選び、「選択箇所を試聴生成」を押してください。");
   });};
   $("save-edit").onclick = () => action(saveEdit);
   $("resolve-edit").onclick = () => action(async()=>{
@@ -487,17 +512,40 @@
   const providerKeyConfigured = () => provider() === "azure" ? settings.azure_api_key_configured : settings.openrouter_api_key_configured;
   function updateProviderUI() {
     const azure=provider() === "azure";
-    $("llm-provider").disabled=!!job;
+    $("provider-selection-note").textContent = job
+      ? `保存済みの接続先：${job.config.llm_provider === "azure" ? "Azure OpenAI Service" : "OpenRouter"}。変更後は「評価設定を保存」を押してください。音声と採用状態は保持され、次回の評価から適用します。`
+      : "OpenRouter または Azure OpenAI Service を選択してください。通常の音声生成・ローカル検査だけなら設定は不要です。";
+    $("llm-provider").disabled=!!busy();
     $("provider-key-label").firstChild.textContent=azure ? "Azure OpenAI API キー" : "OpenRouter API キー";
     $("openrouter-model-field").classList.toggle("hidden",azure);
     $("azure-fields").classList.toggle("hidden",!azure);
-    $("azure-text-deployment").disabled=!!job;
+    $("azure-text-deployment").disabled=!!busy();
+    $("save-provider").classList.toggle("hidden",!job);
+    $("save-provider").disabled=!!busy();
     $("refresh-models").classList.toggle("hidden",azure);
     $("key-status").textContent=azure
       ? `${settings.azure_endpoint_configured ? "Azure エンドポイント設定済み" : "サーバーに AZURE_OPENAI_ENDPOINT を設定してください"} · ${providerKeyConfigured() ? "サーバーの API キーを利用できます" : "API キーを入力してください"}`
       : providerKeyConfigured() ? "サーバーの API キーを利用できます" : "外部評価を使う場合のみキーが必要です";
     $("feedback-provider-note").textContent=`採用中の音声と本文を${azure ? "Azure OpenAI Service" : "OpenRouter"}に送信します。提案は自動で採用されません（制作あたり最大50回）。`;
   }
+  for (const id of ["setup-provider", "feedback-settings"]) $(id).onclick = () => {
+    $("external-settings").open = true;
+    $("external-settings").scrollIntoView({block:"start"});
+    $("external-settings").querySelector("summary").focus();
+  };
+  $("save-provider").onclick = () => action(async () => {
+    if (!job) return;
+    const selected = config();
+    const keys = ["llm_provider", "llm_model", "audio_judge_model"];
+    const values = Object.fromEntries(keys.map(k => [k, selected[k]]));
+    const expected = Object.fromEntries(keys.map(k => [k, job.config[k] ?? (k === "llm_provider" ? "openrouter" : "")]));
+    const data = await api(`/api/jobs/${job.id}/evaluation-settings`, {
+      method:"PUT", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({settings:values, expected})
+    });
+    render(data);
+    notice("評価設定を保存しました。次回の評価から適用します。過去の評価と音声は保持しています。");
+  });
   $("llm-provider").onchange=()=>{$("api-key").value="";updateProviderUI();};
   $("azure-audio-deployment").oninput=()=>{if(job)$("judge").disabled=busy() || !current()?.accepted || !audioJudgeModel();};
   function fillModels(models) {

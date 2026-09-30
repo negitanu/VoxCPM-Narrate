@@ -10,3 +10,11 @@
 .reading-card label{font-size:12px;margin:12px 0}.reading-card p{margin:8px 0}.reading-card input:not([type=checkbox]){width:100%}.reading-card button{font-size:12px;padding:8px 10px}
 .reference-studio{border:1px solid var(--line);border-radius:8px;background:var(--surface);padding:20px;margin:24px 0}.reference-studio h2{margin-top:0}.reference-studio textarea{font-size:17px;line-height:1.9}#record-status{font-size:13px;min-height:1.5em}#reference-source{overflow-wrap:anywhere}
 .library-row{display:flex;align-items:center;gap:4px;min-width:0}.library-row .library-item{flex:1;min-width:0}.library-delete{flex:none;font-size:11px;padding:6px;border:0;color:var(--muted)}@media(max-width:650px){.library-row{min-width:205px;max-width:270px}}
+
+/* Task order and progressively disclosed settings. */
+.workflow{display:flex;gap:12px;list-style:none;padding:0;margin:24px 0;flex-wrap:wrap}.workflow li{padding:10px 14px;border-radius:7px;background:var(--wash);color:var(--accent);font-weight:550}
+.form-step{padding:22px 0;border-top:1px solid var(--line)}.optional-settings{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:18px;margin:16px 0}.optional-settings summary span{display:block;margin-top:6px}.optional-settings .reference-studio{border:0;padding:0;margin-bottom:0}
+.next-action{background:var(--wash);border:1px solid #bdd2c9;border-radius:var(--radius);padding:20px;margin:20px 0}.next-action p{margin:10px 0}.next-action .toolbar{margin-bottom:0}.inline-help{font-size:12px;padding:12px 0 0;margin-top:12px}.inline-help summary:hover{color:var(--accent)}.project-actions{margin:0 0 22px;padding:16px}.workbench .list-heading{flex-wrap:wrap}.export-row{scroll-margin-top:24px}summary{line-height:1.6}summary:hover{color:var(--accent)}
+@media(max-width:650px){.sidebar .import{display:block}.workflow{gap:6px}.workflow li{font-size:12px;padding:8px}.title-row{flex-wrap:wrap}.next-action{padding:16px}.next-action .actions>*{flex:1 1 160px}}
+
+.azure-setup{grid-column:1/-1;font-size:13px;overflow-wrap:anywhere}.azure-setup h3{margin-top:12px}#external-settings{scroll-margin-top:20px}
