@@ -63,6 +63,17 @@ class PreviewBody(Validated):
     config: Config = Field(default_factory=Config)
 
 
+class EvaluationSettings(Validated):
+    llm_provider: Literal["openrouter", "azure"]
+    llm_model: str = Field(max_length=200)
+    audio_judge_model: str = Field(max_length=200)
+
+
+class EvaluationSettingsBody(Validated):
+    settings: EvaluationSettings
+    expected: EvaluationSettings
+
+
 class RenameBody(Validated):
     title: str = Field(min_length=1, max_length=150)
     expected_title: str = Field(max_length=150)
@@ -317,6 +328,25 @@ def public(job):
 @app.get("/api/jobs/{jid}")
 def get_job(jid: str):
     return public(manager.get(jid))
+
+
+@app.put("/api/jobs/{jid}/evaluation-settings")
+def update_evaluation_settings(jid: str, body: EvaluationSettingsBody):
+    values = body.settings.model_dump()
+    values["llm_model"] = values["llm_model"].strip()
+    values["audio_judge_model"] = values["audio_judge_model"].strip()
+    if not values["llm_model"] or not values["audio_judge_model"]:
+        raise ValueError("テキスト評価と音声評価のモデル／デプロイ名を指定してください")
+
+    def change(job):
+        check_idle(job)
+        current = {k: job["config"].get(k, "openrouter" if k == "llm_provider" else "")
+                   for k in values}
+        if current != body.expected.model_dump():
+            raise Conflict("評価設定が変更されました。制作を開き直して確認してください")
+        job["config"].update(values)
+
+    return public(manager.mutate(jid, change))
 
 
 @app.patch("/api/jobs/{jid}/title")

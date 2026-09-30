@@ -528,6 +528,29 @@ class StudioTests(unittest.TestCase):
         self.manager.delete(job["id"])
         self.assertEqual(self.client.patch(url, json={"title": "名前", "expected_title": "処理中の新しい名前"}).status_code, 404)
 
+    def test_change_evaluation_provider_preserves_production_and_rejects_stale_or_busy(self):
+        job = self.create()
+        jid = job["id"]
+        original = self.manager.get(jid)
+        keys = ("llm_provider", "llm_model", "audio_judge_model")
+        expected = {k: original["config"][k] for k in keys}
+        target = dict(llm_provider="azure", llm_model="text-deployment",
+                      audio_judge_model="audio-deployment")
+        url = f"/api/jobs/{jid}/evaluation-settings"
+        response = self.client.put(url, json=dict(settings=target, expected=expected))
+        self.assertEqual(response.status_code, 200, response.text)
+        saved = self.manager.get(jid)
+        self.assertEqual({k: saved["config"][k] for k in keys}, target)
+        for key in ("segments", "script", "export", "evaluation_count"):
+            self.assertEqual(saved[key], original[key])
+        self.assertEqual(self.client.put(url, json=dict(settings=target, expected=expected)).status_code, 409)
+        self.manager.update(jid, status="running")
+        self.assertEqual(self.client.put(url, json=dict(settings=expected, expected=target)).status_code, 409)
+        self.manager.update(jid, status="draft")
+        invalid = {**target, "llm_model": " "}
+        self.assertEqual(self.client.put(url, json=dict(settings=invalid, expected=target)).status_code, 400)
+        self.assertEqual(self.client.put(url, json=dict(settings=expected, expected=target)).status_code, 200)
+
     def test_error_logging_does_not_raise(self):
         log_error("expected test error")
 

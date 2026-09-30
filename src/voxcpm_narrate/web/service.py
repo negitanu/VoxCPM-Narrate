@@ -583,6 +583,8 @@ class ProductionService:
             ).to_dict()
             if not result.get("parse_fallback"):
                 write_json(cache, result)
+        result["provider"] = provider
+        result["model"] = model
         result["version_id"] = v["id"]
         self.manager.mutate(jid, lambda j: segment(j, sid).update(feedback=result))
 
